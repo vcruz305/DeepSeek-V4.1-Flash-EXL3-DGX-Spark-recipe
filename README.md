@@ -49,6 +49,7 @@ DeepSeek-V4.1 has 384 routed experts, hidden size 5120, expert intermediate size
 |---|---:|---:|---|
 | TP4 + EP4 | 96 | 5120 × 2304 | TP4 correctness baseline |
 | TP2 + EP2 | 192 | 5120 × 2304 | TP2 correctness baseline |
+| **TP1 / EP1 (1× Spark, one device)** | **384** | **5120 × 2304** | **measured serving**; no sharding, every expert local. Runs *native ExLlamaV3*, not vLLM — see [`one-spark-tp1/`](one-spark-tp1/) |
 | pure MoE TP2 / EP1 | 384 | 5120 × 1152 | experimental A/B; 1152 is exactly 128-aligned |
 | pure MoE TP4 / EP1 | 384 | 5120 × 576 | guarded; 576 is not 128-aligned and 576→640 padding is not implemented here |
 
