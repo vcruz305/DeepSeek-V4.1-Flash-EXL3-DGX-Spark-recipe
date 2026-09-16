@@ -113,6 +113,32 @@ class RecipeContractTests(unittest.TestCase):
             self.assertTrue(report["deployable_with_current_pinned_loader"], report)
             self.assertEqual(report["trellis_k_histogram"], {"7": 2})
 
+    def test_validator_accepts_physical_k1_supported_by_exllamav3(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "pack"
+            self._write_pack(
+                root,
+                {
+                    "model.layers.0.ffn.experts.0.w1_trellis": ("I16", [1, 1, 16]),
+                    "model.layers.0.ffn.experts.0.w2_trellis": ("I16", [1, 1, 16]),
+                },
+            )
+            report = validate_pack(root, "tp2", 0)
+            self.assertTrue(report["deployable_with_current_pinned_loader"], report)
+            self.assertEqual(report["trellis_k_histogram"], {"1": 2})
+            self.assertEqual(report["unsupported_k"], [])
+
+    def test_validator_still_rejects_k_outside_kernel_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "pack"
+            self._write_pack(
+                root,
+                {"model.layers.0.ffn.experts.0.w1_trellis": ("I16", [1, 1, 144])},
+            )
+            report = validate_pack(root, "tp2", 0)
+            self.assertFalse(report["deployable_with_current_pinned_loader"])
+            self.assertEqual(report["unsupported_k"], [9])
+
     def test_validator_accepts_mixed_k_within_layer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "pack"
@@ -231,4 +257,3 @@ class Sm120PreflightContractTests(unittest.TestCase):
         text = (ROOT / "scripts/preflight_sm120_uva.py").read_text()
         self.assertIn("from vllm.models.deepseek_v4_1 import DeepseekV41ForCausalLM", text)
         self.assertNotIn("deepseek_v4_1.nvidia.model import DeepseekV41ForCausalLM", text)
-
