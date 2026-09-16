@@ -39,7 +39,8 @@ The required runtime overlay is therefore:
       "activation_scheme": "dynamic",
       "weight_block_size": [32, 32]
     },
-    "mtp_experts": "source"
+    "mtp_experts": "source",
+    "mtp_experts_start_layer": 40
   }
 }
 ```
