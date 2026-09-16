@@ -1,0 +1,77 @@
+# TabbyAPI config for DeepSeek-V4.1-Flash EXL3 on ONE DGX Spark (GB10), TP1.
+#
+# STATUS: configuration guidance. This has NOT been run end-to-end against this pack on a Spark.
+# No TabbyAPI throughput numbers are published in this recipe. See README.md in this folder.
+#
+# Key names below are taken from TabbyAPI's own config_sample.yml. Values are chosen to match the
+# measured-best native-ExLlamaV3 configuration in ../README.md.
+#
+# IMPORTANT: TabbyAPI does not know about the ATS zero-copy environment variables. Export them in
+# the shell BEFORE launching TabbyAPI, or the model will be copied wholesale and will not fit:
+#
+#   export EXL3_ATS_MMAP=1
+#   export EXL3_ATS_COPY='^(?!mtp\.)'
+#   export EXL3_DSPARK_CONF=0.7
+#
+# See tabbyapi/README.md for the launcher that does this.
+
+network:
+  host: 127.0.0.1
+  port: 5000
+  disable_auth: false
+
+model:
+  # Parent directory containing the model folder.
+  model_dir: /home/markus/models
+
+  # The 64-byte re-laid pack (see ../README.md "Pack preparation"). A pack that has NOT been
+  # re-laid will load, but most tensors will be copied instead of aliased and it will not fit.
+  model_name: DSV4.1-Flash-SAGE-EXL3-1.59bpw-a64
+
+  # Matches the context used for the measured numbers.
+  max_seq_len: 6144
+  cache_size: 6144
+
+  # FP16 KV. The measured native runs used the default cache dtype; quantized KV
+  # (e.g. "8,8") is untested for this pack on this hardware.
+  cache_mode: FP16
+
+  # 2048 is correct once the model is resident in CUDA memory. 4096 measured faster when the
+  # weights were still aliased, but does not fit with the model copied in.
+  chunk_size: 2048
+
+  max_batch_size: 1
+
+  # Single Spark, single CUDA device. ExLlamaV3 tensor parallelism is single-host only and is
+  # not used here; TP2/TP4 in this repository are the vLLM path, not this one.
+  tensor_parallel: false
+
+  # One device, so autosplit has nothing to split. Leave gpu_split empty.
+  gpu_split_auto: false
+  gpu_split: []
+
+  # Text only. The measured configuration does not load the vision tower.
+  vision: false
+
+draft_model:
+  # The DSpark drafter for this model is the MTP head carried inside the same pack as `mtp.*`
+  # tensors, not a separate draft model directory. TabbyAPI exposes this as draft_mode "mtp".
+  #
+  # UNVERIFIED: whether TabbyAPI's "mtp" mode requires draft_model_name to be set when the MTP
+  # head lives inside the main pack. If it errors asking for a draft model, set draft_model_dir
+  # and draft_model_name to the same values as the model section above.
+  draft_mode: mtp
+
+  draft_cache_mode: FP16
+
+  # ExLlamaV3 applies a mode-specific default when unset. The native runs used a DSpark block
+  # size of 5 with a confidence gate of 0.7 (EXL3_DSPARK_CONF, exported in the environment).
+  draft_num_tokens:
+
+  # Leave off for a first boot so behaviour matches the measured configuration.
+  dynamic_draft: false
+
+logging:
+  log_prompt: false
+  log_generation_params: false
+  log_requests: false
