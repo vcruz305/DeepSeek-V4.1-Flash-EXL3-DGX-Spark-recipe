@@ -1,0 +1,62 @@
+{
+  "schema": "dsv41-exl3-runtime-metadata-attestation.v1",
+  "model_repo": "vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw",
+  "revision": "0c29707b4fbcdd2e7ce61bc336dd355d6a9e1994",
+  "config_sha256": "25882944c203b1970a9187dc47334ebafbb7e95ffda888fd86c8181af9e15867",
+  "index_tensor_count": 188245,
+  "materialized_shard_bytes": 330385931208,
+  "trellis_k_histogram": {
+    "1": 27210,
+    "2": 11811,
+    "3": 5774,
+    "4": 1221,
+    "5": 62,
+    "6": 2
+  },
+  "codebook_marker_counts": {
+    "mul1": 46080
+  },
+  "shard_header_sha256": {
+    "model-00001-of-00017.safetensors": "e461d4d87173a293978cfa499f0a7d676578c739da002c2684b643d83a3e5daa",
+    "model-00002-of-00017.safetensors": "facc61398924f4137a0ca0427c3bb8e30c1cc72b4201ca15116f9dbd01c7fcf1",
+    "model-00003-of-00017.safetensors": "269e2a0a0796189c314342774d79b605acc72bf2c8f6d29bcbcfcf5997a886e8",
+    "model-00004-of-00017.safetensors": "7fdd1e8794913da140423b4cb5ef9ae561df0a6a83894e1adf6983e00c30159d",
+    "model-00005-of-00017.safetensors": "0334435e02920f1d101d4c67a48be23ca7771aa8484eec704c79296491da611a",
+    "model-00006-of-00017.safetensors": "0a2ed1a3c6854a6cc0acc3b3a1e948ddbc272585f5ec513ff744d4e57e835bb9",
+    "model-00007-of-00017.safetensors": "c02de1310854f1de2d1738d50db43cb86774e6448a000db68d06cf077d007406",
+    "model-00008-of-00017.safetensors": "7764c52c61dea2f54752e9c5b0442ce9427fe96acc78e9a852c9836df269018e",
+    "model-00009-of-00017.safetensors": "9b56f0d8b637a862aaeb8797892af0b66e02372b1c00502d0580fe4f91018329",
+    "model-00010-of-00017.safetensors": "65cc57ca069e3c197e3d72e802ed5349200dfc4697556f5a98a89d2142d4207f",
+    "model-00011-of-00017.safetensors": "f138515803167a8b380fb442abde9e27927c2fe75f953383520a4977e59ebd67",
+    "model-00012-of-00017.safetensors": "821ba53f4d680e213e0ab7a9f7c2c76912c7e5d8b12e16ec6c2566efa0bbb51f",
+    "model-00013-of-00017.safetensors": "b3095f5d0b82144a0f444e71ce67ba61fd61ec7b4ae20624e25030ca1c39ed11",
+    "model-00014-of-00017.safetensors": "3f334f5ad5133399db551969966f373a9a256b0bbc36ea6512ea706f9fb5b61c",
+    "model-00015-of-00017.safetensors": "87acad2c3dddd571a4b2dc79f137f48592f9fdcfd1be2555951697681412a461",
+    "model-00016-of-00017.safetensors": "e5c5c7fc900caec400644bef07aa5d7e28fc6ca941c8c47592b393963b218242",
+    "model-00017-of-00017.safetensors": "5d8fa4697d7a071c31baeee6947d493c08ea3243261c5d0f79c355ad191b8222"
+  },
+  "runtime_hf_overrides": {
+    "quantization_config": {
+      "quant_method": "exl3",
+      "bits": 2,
+      "codebook": "mul1",
+      "mtp_experts": "source",
+      "mtp_experts_start_layer": 40,
+      "weight_block_size": [32, 32],
+      "non_routed_quantization": {
+        "quant_method": "deepseek_v4_fp8",
+        "fmt": "e4m3",
+        "activation_scheme": "dynamic",
+        "scale_fmt": "ue8m0",
+        "weight_block_size": [32, 32],
+        "expert_dtype": "fp4"
+      }
+    }
+  },
+  "provenance": {
+    "source_model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "source_dense_quantization": "FP8 dynamic, 32x32 block",
+    "source_mtp_experts": "MXFP4/source",
+    "policy": "runtime-only symlink-view override for exact attested snapshot; canonical checkpoint files remain unchanged"
+  }
+}

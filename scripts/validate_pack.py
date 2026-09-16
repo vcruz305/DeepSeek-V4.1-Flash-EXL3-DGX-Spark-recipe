@@ -53,6 +53,21 @@ def gib(value: int) -> float:
     return value / (1024**3)
 
 
+def physical_trellis_k_capability(lock: dict[str, Any]) -> set[int]:
+    """Return physical K widths executable by the baseline ExLlamaV3 backend.
+
+    ``accepted_exl3_config_k`` describes values accepted in the checkpoint's
+    top-level EXL3 config. Individual expert trellises can be narrower than that
+    base declaration, so physical headers must be checked against the kernel
+    capability instead. Older locks fall back to the config list.
+    """
+    capabilities = lock["capabilities"]
+    values = capabilities.get(
+        "exllamav3_moe_kernel_k", capabilities["accepted_exl3_config_k"]
+    )
+    return {int(k) for k in values}
+
+
 def read_safetensors_header(
     path: Path,
 ) -> tuple[str, dict[str, Any] | None, str | None, int, str | None]:
@@ -127,7 +142,7 @@ def validate_pack(
     root = model_dir.expanduser().resolve()
     tp_key = "tp4" if topology == "tp4" else "tp2"
     model_contract = lock["models"][tp_key]
-    allowed_k = set(int(k) for k in lock["capabilities"]["accepted_exl3_config_k"])
+    allowed_k = physical_trellis_k_capability(lock)
     layer_uniform_required = not bool(
         lock["capabilities"].get("tensor_level_mixed_k_within_layer", False)
     )

@@ -20,7 +20,12 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from runtime_lock import load_lock
-from validate_pack import DTYPE_BYTES, expected_tensor_bytes, trellis_k
+from validate_pack import (
+    DTYPE_BYTES,
+    expected_tensor_bytes,
+    physical_trellis_k_capability,
+    trellis_k,
+)
 
 MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_REMOTE_HEADER_BYTES = 256 * 1024 * 1024
@@ -109,7 +114,7 @@ def fetch_safetensors_header(
 def probe(repo_id: str, revision: str, topology: str, token: str | None) -> dict[str, Any]:
     lock = load_lock()
     model_contract = lock["models"][topology]
-    allowed_k = set(int(k) for k in lock["capabilities"]["accepted_exl3_config_k"])
+    allowed_k = physical_trellis_k_capability(lock)
     layer_uniform_required = not bool(
         lock["capabilities"].get("tensor_level_mixed_k_within_layer", False)
     )

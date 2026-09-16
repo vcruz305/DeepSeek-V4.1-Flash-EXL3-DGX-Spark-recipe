@@ -33,6 +33,49 @@ class FakeResponse:
 
 
 class RemoteProbeTests(unittest.TestCase):
+    def _probe_physical_k(self, k: int) -> dict:
+        tensor = "model.layers.0.ffn.experts.0.w1_trellis"
+        config = {
+            "quantization_config": {
+                "quant_method": "exl3",
+                "mtp_experts": "source",
+                "non_routed_quantization": {
+                    "quant_method": "deepseek_v4_fp8",
+                    "weight_block_size": [32, 32],
+                },
+            }
+        }
+        index = {"weight_map": {tensor: "model-00001-of-00001.safetensors"}}
+        header = {
+            tensor: {
+                "dtype": "I16",
+                "shape": [1, 1, k * 16],
+                "data_offsets": [0, k * 32],
+            }
+        }
+        lock = {
+            "models": {"tp2": {"expected_shards": 1}},
+            "capabilities": {
+                "accepted_exl3_config_k": [2, 3, 4, 5, 6, 7, 8],
+                "exllamav3_moe_kernel_k": [1, 2, 3, 4, 5, 6, 7, 8],
+                "tensor_level_mixed_k_within_layer": True,
+            },
+        }
+        with (
+            patch.object(probe, "load_lock", return_value=lock),
+            patch.object(
+                probe,
+                "fetch_small",
+                side_effect=[json.dumps(config).encode(), json.dumps(index).encode()],
+            ),
+            patch.object(
+                probe,
+                "fetch_safetensors_header",
+                return_value=(header, 128 + k * 32, 128),
+            ),
+        ):
+            return probe.probe("owner/model", "deadbeef", "tp2", None)
+
     def test_hf_resolve_url_pins_revision(self) -> None:
         url = probe.hf_resolve_url("owner/model", "deadbeef", "model-00001.safetensors")
         self.assertIn("/owner/model/resolve/deadbeef/model-00001.safetensors", url)
@@ -84,6 +127,16 @@ class RemoteProbeTests(unittest.TestCase):
         self.assertEqual(got_total, total)
         self.assertEqual(payload_start, 8 + len(raw))
         self.assertEqual(mocked.call_count, 2)
+
+    def test_remote_probe_accepts_physical_k1_kernel_capability(self) -> None:
+        report = self._probe_physical_k(1)
+        self.assertTrue(report["remote_layout_compatible"], report)
+        self.assertEqual(report["unsupported_k"], [])
+
+    def test_remote_probe_rejects_k_outside_kernel_capability(self) -> None:
+        report = self._probe_physical_k(9)
+        self.assertFalse(report["remote_layout_compatible"])
+        self.assertEqual(report["unsupported_k"], [9])
 
     def test_collective_is_part_of_normal_preflight(self) -> None:
         preflight = (ROOT / "scripts" / "preflight.sh").read_text()

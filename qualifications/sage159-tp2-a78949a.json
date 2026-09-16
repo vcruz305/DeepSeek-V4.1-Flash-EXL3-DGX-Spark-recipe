@@ -1,0 +1,116 @@
+{
+  "schema": "dsv41-exl3-hardware-qualification.v1",
+  "recorded_at": "2026-09-16T04:30:55Z",
+  "status": "pass",
+  "scope": {
+    "claim": "two_dgx_spark_tp2_ep2_131072_serving",
+    "runtime_derivation": "external_reference",
+    "canonical_runtime_lock_unchanged": true
+  },
+  "model": {
+    "repo_id": "vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw",
+    "revision": "0c29707b4fbcdd2e7ce61bc336dd355d6a9e1994",
+    "expected_shards": 17,
+    "tensor_shard_bytes": 330385931208,
+    "snapshot_files": 23,
+    "snapshot_bytes": 330406735253,
+    "metadata_attestation": "attestations/tp2-sage159-0c29707b-metadata.json",
+    "metadata_attestation_sha256": "5b8ea53c969071e255dc71ffff3dea2bcfba23dc58d9e186cdc4e0481357ae06"
+  },
+  "runtime": {
+    "base_image": "dsv41-flash-exl3-sm121:streaming-6d6d9fc",
+    "base_image_id": "sha256:19034008ed831ea886c548bd637fdb74169ba0fed1909f26109961fb8c37580c",
+    "head_candidate_image_id": "sha256:4e496103efbd4337a366ace698626aceb539475cf365188c79137aadefb4d5de",
+    "worker_candidate_image_id": "sha256:f4a9b6a2ccb76c752d0d02e34eaf7d57c9fe9706ee1345bfb0f2bf9633b63058",
+    "vllm_exl3_repo": "https://github.com/vcruz305/vllm-exl3.git",
+    "vllm_exl3_commit": "a78949ac82e071f2c3ca7477910d5d9641df6d80",
+    "vllm": "0.1.dev20904+g179dd0fa9",
+    "vllm_exl3": "0.4.2",
+    "exllamav3": "1.4.9",
+    "torch": "2.13.0+cu130"
+  },
+  "topology": {
+    "nodes": 2,
+    "tensor_parallel_size": 2,
+    "expert_parallel_size": 2,
+    "local_experts_per_rank": 192,
+    "distributed_executor_backend": "mp",
+    "engram": "local_nvme_disk_backed"
+  },
+  "serving": {
+    "max_model_len": 131072,
+    "max_num_seqs": 1,
+    "max_num_batched_tokens": 512,
+    "kv_cache_dtype": "fp8",
+    "kv_cache_bytes_per_rank": 4294967296,
+    "gpu_memory_utilization": 0.75,
+    "block_size": 64,
+    "eager": true,
+    "cuda_graphs": false,
+    "prefix_caching": false,
+    "speculative_policy": "none_requested",
+    "moe_backend": "exllamav3",
+    "dspark": false
+  },
+  "measurements": {
+    "cold_orchestration_ready_seconds": 628.185,
+    "smoke": {
+      "prompt": "What is 17 multiplied by 19? Return only the integer.",
+      "expected": "323",
+      "observed": "323",
+      "passed": true
+    },
+    "streamed_benchmarks": {
+      "runs_per_workload": 3,
+      "completion_tokens": 128,
+      "prose_median_ttft_seconds": 0.3568268340313807,
+      "prose_median_decode_tokens_per_second": 11.047973514155938,
+      "counting_median_ttft_seconds": 0.2941559990285896,
+      "counting_median_decode_tokens_per_second": 10.381844161241284
+    },
+    "context_probes": [
+      {
+        "target_tokens": 32768,
+        "prompt_tokens": 30835,
+        "completion_tokens": 18,
+        "elapsed_seconds": 49.893,
+        "keys_found": 3,
+        "passed": true
+      },
+      {
+        "target_tokens": 65536,
+        "prompt_tokens": 63603,
+        "completion_tokens": 18,
+        "elapsed_seconds": 93.175,
+        "keys_found": 3,
+        "passed": true
+      },
+      {
+        "target_tokens": 128000,
+        "prompt_tokens": 126067,
+        "completion_tokens": 17,
+        "elapsed_seconds": 184.656,
+        "keys_found": 3,
+        "passed": true
+      }
+    ],
+    "post_probe_health": {
+      "head_restart_count": 0,
+      "worker_restart_count": 0,
+      "head_available_memory_bytes": 46870843392,
+      "worker_available_memory_bytes": 47554527232,
+      "head_swap_bytes": 0,
+      "worker_swap_bytes": 0,
+      "head_fatal_log_signature_count": 0,
+      "worker_fatal_log_signature_count": 0
+    }
+  },
+  "reference_profile": "qualifications/sage159-tp2-131k.env",
+  "limitations": [
+    "The canonical runtime.lock.json image was not used or changed.",
+    "The configured and tested serving window was 131072 tokens, not 262144.",
+    "The largest server-counted prompt was 126067 tokens.",
+    "Concurrency above one sequence, CUDA graphs, prefix caching, and DSpark were not qualified.",
+    "The checkpoint attestation covers config and safetensors header/layout identity, not full tensor payload hashes."
+  ]
+}

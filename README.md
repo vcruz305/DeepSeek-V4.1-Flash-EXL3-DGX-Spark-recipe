@@ -10,6 +10,7 @@ Serving and qualification tooling for **DeepSeek-V4.1-Flash EXL3** on NVIDIA DGX
 |---|---|---|
 | **TP4 / 4× Spark** | `vcruz305/DSV4.1-Flash-EXL3-4.75bpw` | **Per-expert mixed K3–K8 is supported by the pinned loader.** Resident Engram is a known GB10 UMA capacity failure. Full disk-backed Engram load/serve qualification is still required before calling TP4 deployable. |
 | **TP2 / 2× Spark** | `vcruz305/DSV4.1-Flash-SAGE-EXL3-3.30bpw` | Mixed-K format is supported; **two-Spark capacity qualification is now the active test target**. EP2 is the baseline; pure MoE TP2 is an explicit A/B. |
+| **TP2 / 2× Spark reference** | `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` | **Externally derived runtime qualified at 131,072 configured context with exact recall at 126,067 prompt tokens.** This does not change the canonical runtime lock. See [`docs/SAGE159_TP2_QUALIFICATION.md`](docs/SAGE159_TP2_QUALIFICATION.md). |
 
 The recipe deliberately separates **loader-format compatibility** from **hardware deployment qualification**.
 
@@ -231,7 +232,9 @@ bash scripts/kernel_dispatch_receipt.sh > kernel-dispatch.txt
 
 V4.1 context estimates must use measured backend allocation for capacity claims. The logical global-cache floor is 890 bytes/token, but that is not a substitute for an actual vLLM cache allocation receipt. See `docs/TP2.md` and `scripts/v41_context_receipt.py`.
 
-128K remains unverified.
+128K remains unverified for the canonical TP2/3.30 path. The separate SAGE
+1.59 reference qualification passed exact recall at 126,067 server-counted
+prompt tokens; see [`docs/SAGE159_TP2_QUALIFICATION.md`](docs/SAGE159_TP2_QUALIFICATION.md).
 
 ## Important files
 
@@ -250,6 +253,7 @@ V4.1 context estimates must use measured backend allocation for capacity claims.
 - `docs/DISK_ENGRAM.md` — disk-backed Engram design/qualification
 - `docs/TP2.md` — TP2 qualification and EP2-vs-TP2 A/B
 - [SAGE 3.30 offload findings](docs/SAGE330_OFFLOAD_FINDINGS.md) — historical two-Spark results, reusable mechanisms and current integration gaps
+- [SAGE 1.59 TP2 qualification](docs/SAGE159_TP2_QUALIFICATION.md) — bounded two-Spark 131K reference receipt on the exact published revision
 - `docs/SGLANG_V41_OPTIMIZATION_NOTES.md` — independently implemented lessons from the SGLang reference article
 - `THIRD_PARTY_NOTICES.md` — attribution and upstream licenses
 
