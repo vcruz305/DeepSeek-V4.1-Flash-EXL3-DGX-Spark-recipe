@@ -52,8 +52,11 @@ git checkout 954a8ca6e59d
 python3 -m venv ~/venvs/exl3_v41
 source ~/venvs/exl3_v41/bin/activate
 
-# aarch64 (Grace) needs the x86-only CPU paths disabled before building the extension
-python3 util/patch_exllamav3_aarch64.py exllamav3/exllamav3_ext 2>/dev/null || true
+# aarch64 (Grace) needs the x86-only CPU paths disabled before building the extension.
+# This script is NOT on the ExLlamaV3 branch; fetch it from vllm-exl3 first.
+curl -fsSL -o util/patch_exllamav3_aarch64.py \
+  https://raw.githubusercontent.com/vcruz305/vllm-exl3/28c3585620df228de07e6f5115fbdc82877ba888/tools/patch_exllamav3_aarch64.py
+python3 util/patch_exllamav3_aarch64.py exllamav3/exllamav3_ext
 
 CUDA_HOME=/usr/local/cuda-13.0 \
 TORCH_CUDA_ARCH_LIST=12.1a \
@@ -63,10 +66,9 @@ MAX_JOBS=8 \
 python3 -c "import exllamav3, exllamav3_ext; print('ok')"
 ```
 
-> If `util/patch_exllamav3_aarch64.py` is not present on the branch, use the copy in
-> `vcruz305/vllm-exl3` at `tools/patch_exllamav3_aarch64.py`. It replaces `__builtin_ia32_pause` /
-> `_mm_pause` with `std::this_thread::yield()` and stubs the AVX2/AVX-512 target functions so the
-> extension compiles on aarch64.
+> The patch replaces `__builtin_ia32_pause` / `_mm_pause` with `std::this_thread::yield()` and stubs
+> the AVX2 / AVX-512 target functions so the extension compiles on aarch64. Run it before
+> `pip install`; skipping it fails the build on x86 intrinsics.
 
 ## Pack preparation: 64-byte re-lay
 
@@ -75,8 +77,11 @@ EXL3 trellis kernels need their `int16` data on a 16-byte boundary. Safetensors 
 tensors back to back, so most shards of an existing EXL3 pack have tensors on odd offsets and the
 loader has to copy them instead, which defeats the purpose.
 
-Measured on this model: **without re-laying, only 48.6 GiB aliased and 67.4 GiB were copied.**
-After re-laying at 64 bytes, all text-model tensors aliased and nothing was copied.
+Measured on this model, counting every shard under the loader's own rule: **without re-laying,
+67.41 GiB of `int16` trellis data sits off the 16-byte grid and is copied into CUDA memory.** After
+re-laying at 64 bytes, none of it is. The `F8_E4M3` engram tables need only 1-byte alignment and are
+aliased either way, which is why `--skip .engram.embed.` costs nothing. See `BENCHMARKS.md` for the
+full breakdown.
 
 ```bash
 python util/align_safetensors.py \
@@ -93,6 +98,60 @@ python util/align_safetensors.py \
 
 > Re-laid packs are **not** drop-in for other loaders. vLLM's `AutoWeightsLoader` rejects the pad
 > tensors unless it is told to ignore that prefix.
+
+### Already downloaded the pack?
+
+Nothing needs re-downloading. The re-lay is a local transform on bytes you already have. Check
+whether yours needs it at all:
+
+```bash
+# from a clone of THIS recipe repo (the commands above run from the ExLlamaV3 checkout)
+python one-spark-tp1/scripts/check_pack_alignment.py /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw
+```
+
+It parses the safetensors headers only, never loads weights and never writes, and reports how many
+GiB would land in unevictable CUDA memory instead of reclaimable page cache. It exits non-zero when
+a re-lay would help. Then run the `align_safetensors.py` command above with your existing directory
+as the source.
+
+- **No weight values change.** The re-lay only moves tensors onto a 64-byte grid and inserts
+  `__align_pad__.*` filler. Nothing is requantized and model output is unaffected.
+- **Budget disk for the rewritten shards, not a second full copy.** Shards already on the grid are
+  symlinked rather than duplicated.
+- **Keep the source directory.** The re-laid directory symlinks back into it.
+- **This is independent of the overlay below.** The overlay is additive and works with or without
+  the re-lay; the re-lay is purely about making the pack fit in 128 GB.
+
+## The EXL3 attention / MTP overlay
+
+**Every measured number in this folder was produced with this overlay in place.** The published pack
+stores attention and the MTP drafter as FP8 rows plus e8m0 scales (`layers.N.attn.wkv.weight` /
+`.scale`). The overlay adds EXL3 trellis versions of those same projections
+(`layers.N.attn.wkv.trellis` / `.suh` / `.svh` / `.mul1`) and of the drafter. Without it you are
+running the FP8 attention path and will not reproduce the tables below.
+
+The overlay is published alongside the pack:
+
+```bash
+hf download vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw \
+  --revision 5dc954019183ab3d994b60433256001a3f1780e7 \
+  --include 'exllamav3/*' --local-dir /models/overlay
+
+# the loader globs the pack directory root, non-recursively: the parts must sit
+# BESIDE model-*.safetensors, not in a subdirectory
+cp /models/overlay/exllamav3/requant_*.safetensors \
+   /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw-a64/
+```
+
+12 files, 10.61 GiB total. Notes:
+
+- The overlay is **additive**: its 7276 tensor names do not exist in the base shards, so nothing is
+  shadowed and the order `glob` returns the files in does not matter. Modules take the trellis path
+  when it is present and fall back to FP8 when it is not.
+- The parts are already on the 64-byte grid, so they need no second `align_safetensors.py` pass.
+- Their internal `__align_pad__.requant_part<N>.*` filler tensors are skipped by the loader.
+- To rebuild rather than download, the fork branch carries
+  `tests/deepseek_v41/requant_attn_exl3.py` and `tests/deepseek_v41/requant_mtp_exl3.py`.
 
 ## The configuration that actually fits
 
@@ -123,7 +182,8 @@ See `scripts/run_tp1.sh` for the exact launcher, including a pre-flight `MemAvai
 | Field | Value |
 |---|---|
 | Runtime | native ExLlamaV3, fork `feat/gb10-ats-load` @ `954a8ca` |
-| Model | local 64-byte re-laid build of `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` (local variant; that exact local build is not published) |
+| Model | 64-byte re-laid build of `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` **plus the EXL3 attention / MTP overlay** (`exllamav3/` in that repo). The re-lay is reproduced with the command above; the overlay is a download. |
+| Model revision | `5dc954019183ab3d994b60433256001a3f1780e7` — the repo revision holding both the pack and the `exllamav3/` overlay. The measured runs used local files byte-identical to it; the re-lay is a local offset-only transform and changes no weight values. |
 | Topology | TP1, single Spark, one CUDA device |
 | Context | `CTX=6144`, prefill chunk as noted per row |
 | Batch | `max_batch_size=1`, single sequence |

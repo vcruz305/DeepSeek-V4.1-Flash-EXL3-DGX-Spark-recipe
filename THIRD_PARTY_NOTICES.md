@@ -26,11 +26,32 @@ The exact upstream source commit represented by the dedicated image tag has not 
 - Role: EXL3 trellis format, codebooks and packed execution.
 - Upstream license: MIT; verify the pinned checkout for exact notices.
 
+### ExLlamaV3 fork used by `one-spark-tp1/` (TP1 only)
+
+The single-Spark TP1 path runs **native ExLlamaV3 from a fork**, not the upstream revision above and
+not through vLLM. It is a separate stack and does not advance `runtime.lock.json`.
+
+- Project: https://github.com/vcruz305/exllamav3
+- Branch: `feat/gb10-ats-load`
+- Pinned revision: `954a8ca6e59d48c3e3462068ecf083fe9990f4dc`
+- Role: `DeepseekV41ForCausalLM`, the DSpark/MTP drafter, the GB10 ATS zero-copy loader and
+  `util/align_safetensors.py`.
+- Upstream license: MIT, inherited from turboderp-org/exllamav3; verify the pinned checkout for
+  exact notices.
+
 ## vllm-exl3
 
 - Project: https://github.com/vcruz305/vllm-exl3
 - Pinned revision: `814d4fe38082cddd838b45418c7d13a95395a36a`
 - License: AGPL-3.0-only plus historical/third-party notices in that repository.
+
+**TP1 build-helper exception.** `one-spark-tp1/` fetches one build-time file,
+`tools/patch_exllamav3_aarch64.py`, at revision `28c3585620df228de07e6f5115fbdc82877ba888`, which is
+one commit ahead of the pinned revision above. That commit ("preserve catchable disabled-CPU symbol
+behavior") is the fix the aarch64 build needs, and the file is present at both revisions with
+different content. This is a build-time helper for the native-ExLlamaV3 TP1 path only: it is not the
+vLLM plugin, it is not loaded at runtime, and it does not advance the `runtime.lock.json` pin that
+governs TP2/TP4.
 
 ### PR #9 — @fattchris
 

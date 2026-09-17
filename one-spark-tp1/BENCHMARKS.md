@@ -17,7 +17,8 @@ Recorded per `AGENTS.md` rule 8. This identity applies to every number in this f
 | CUDA | 13.0, `TORCH_CUDA_ARCH_LIST=12.1a` |
 | Architecture class | `DeepseekV41ForCausalLM` |
 | Drafter | `deepseek_v41_mtp.py` (DSpark / MTP block drafting, block size 5) |
-| Model | local 64-byte re-laid build of `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw`; that exact local build is not published |
+| Model | 64-byte re-laid build of `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` **plus the EXL3 attention / MTP overlay** (`exllamav3/` in that repo) |
+| Model revision | `5dc954019183ab3d994b60433256001a3f1780e7` (pack + `exllamav3/` overlay) |
 | Topology | TP1, one local CUDA device |
 | Context | `CTX=6144` |
 | Batch | `max_batch_size=1`, single sequence |
@@ -65,6 +66,13 @@ Chunk 4096 does not fit once the model is resident; use 2048 in that configurati
 |---|---:|---:|
 | As published (tensors on arbitrary offsets) | 48.6 GiB | 67.4 GiB |
 | Re-laid at 64-byte alignment | all text-model tensors | none |
+
+Counted over all 17 shards under the loader's own rule (`align = 16` for `int16`, `dtype.itemsize`
+otherwise, tensors below 1 MiB always copied): the published pack leaves **67.41 GiB** of `int16`
+trellis data off the 16-byte grid, and the re-laid pack leaves **none**. The `F8_E4M3` engram tables
+alias either way, which is why `--skip .engram.embed.` costs nothing. A misaligned tensor is copied
+into unevictable CUDA memory rather than rejected, so an un-re-laid pack does not fail, it just
+stops fitting.
 
 ## Measured negative results
 

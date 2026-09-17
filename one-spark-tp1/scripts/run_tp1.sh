@@ -10,7 +10,10 @@ set -euo pipefail
 
 VENV="${VENV:-$HOME/venvs/exl3_v41}"
 MODEL_DIR="${MODEL_DIR:?set MODEL_DIR to the 64-byte re-laid pack directory}"
-ENTRY="${ENTRY:?set ENTRY to your ExLlamaV3 driver script}"
+# Defaults to the interactive driver shipped next to this script. Point ENTRY at your own
+# ExLlamaV3 driver to run something else.
+ENTRY="${ENTRY:-$(dirname "$0")/chat_v41_gb10.py}"
+[ -f "$ENTRY" ] || { echo "ENTRY=$ENTRY does not exist" >&2; exit 2; }
 
 # --- Zero-copy / placement -------------------------------------------------
 # Alias weights out of the safetensors mapping instead of copying them.
@@ -50,7 +53,10 @@ fi
 
 # ATS addressing mode is what makes zero-copy aliasing possible at all.
 if command -v nvidia-smi >/dev/null 2>&1; then
-  mode=$(nvidia-smi -q 2>/dev/null | awk -F: '/Addressing Mode/{gsub(/ /,"",$2); print $2; exit}')
+  # awk exits at the first match, so nvidia-smi is killed by SIGPIPE while still
+  # writing. Under `set -o pipefail` that is a fatal 141 and the launcher dies
+  # before exec, so the failure is tolerated explicitly here.
+  mode=$(nvidia-smi -q 2>/dev/null | awk -F: '/Addressing Mode/{gsub(/ /,"",$2); print $2; exit}' || true)
   if [ "${mode:-}" != "ATS" ]; then
     echo "warning: addressing mode is '${mode:-unknown}', expected ATS; aliasing will fall back to copies" >&2
   fi

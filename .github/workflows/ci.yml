@@ -18,11 +18,16 @@ jobs:
           python-version: "3.12"
 
       - name: Shell syntax
-        run: bash -n scripts/*.sh
+        run: |
+          # bash -n takes ONE script; extra arguments become positional parameters, so
+          # "bash -n scripts/*.sh" only ever parsed the first file. Loop instead.
+          for f in scripts/*.sh one-spark-tp1/scripts/*.sh; do
+            bash -n "$f"
+          done
 
       - name: Python syntax
         run: |
-          for f in scripts/*.py tests/*.py; do
+          for f in scripts/*.py tests/*.py one-spark-tp1/scripts/*.py; do
             python -m py_compile "$f"
           done
 
