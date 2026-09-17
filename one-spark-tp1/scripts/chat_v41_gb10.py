@@ -11,7 +11,9 @@ Each line you type is sent as a raw completion prompt; the continuation streams 
 tok/s and draft acceptance. Commands: /tokens N, /quit.
 
 Environment:
-    MODEL_DIR   required, the 64-byte re-laid pack directory
+    MODEL_DIR   required, the pack directory (base pack plus the exllamav3/ overlay
+                parts copied in beside the shards). A 64-byte re-laid pack is not
+                required for this configuration; see ../README.md.
     EXL3_SRC    optional, path to an ExLlamaV3 source checkout to import instead of the
                 installed package (only needed if you did not `pip install .` the fork)
     CTX         context length (default 6144)
@@ -36,7 +38,8 @@ from exllamav3.generator.sampler import GreedySampler
 
 M = os.environ.get("MODEL_DIR")
 if not M:
-    sys.exit("MODEL_DIR is not set; point it at the 64-byte re-laid pack directory")
+    sys.exit("MODEL_DIR is not set; point it at the pack directory "
+             "(base pack plus the exllamav3/ overlay parts)")
 if not os.path.isdir(M):
     sys.exit(f"MODEL_DIR={M} is not a directory")
 CTX = int(os.environ.get("CTX", "6144"))

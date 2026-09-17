@@ -70,18 +70,29 @@ python3 -c "import exllamav3, exllamav3_ext; print('ok')"
 > the AVX2 / AVX-512 target functions so the extension compiles on aarch64. Run it before
 > `pip install`; skipping it fails the build on x86 intrinsics.
 
-## Pack preparation: 64-byte re-lay
+## Pack preparation: 64-byte re-lay (optional, and NOT needed for the fast config)
 
-Zero-copy aliasing can only alias a tensor whose bytes already sit where the kernels expect them.
-EXL3 trellis kernels need their `int16` data on a 16-byte boundary. Safetensors writers pack
-tensors back to back, so most shards of an existing EXL3 pack have tensors on odd offsets and the
-loader has to copy them instead, which defeats the purpose.
+**Read this first: for the configuration every measured number in this folder uses, you do not need
+to re-lay anything.** Download the pack, drop in the `exllamav3/` overlay described below, and run.
+Measured A/B, same benchmark, same settings, one run per pack layout:
 
-Measured on this model, counting every shard under the loader's own rule: **without re-laying,
-67.41 GiB of `int16` trellis data sits off the 16-byte grid and is copied into CUDA memory.** After
-re-laying at 64 bytes, none of it is. The `F8_E4M3` engram tables need only 1-byte alignment and are
-aliased either way, which is why `--skip .engram.embed.` costs nothing. See `BENCHMARKS.md` for the
-full breakdown.
+| pack layout | fresh 5-12 median | fresh 5-12 mean | repeats | acceptance |
+|---|---:|---:|---:|---:|
+| 64-byte re-laid + overlay | 17.29 | 18.32 | 20.12 – 24.68 | 0.889 |
+| **as published + overlay (no re-lay)** | **17.67** | **19.95** | **19.82 – 25.06** | **0.889** |
+
+Both loaded `torch_alloc 107.19 GiB` and reported `aliased/copied GiB [6.66, 0.0]`. The reason is in
+that second number: with `EXL3_ATS_COPY='^(?!mtp\.)'` the main model is copied into CUDA regardless
+of where its bytes sit, so tensor alignment is only ever consulted for the aliased drafter, and the
+overlay's drafter parts are already on the grid.
+
+The re-lay matters for the **fully-aliased** low-memory mode (`EXL3_ATS_MMAP=1`, no copy, 13.96–14.19
+tok/s), where weights stay reclaimable in page cache. There, counting every shard under the loader's
+own rule, **67.41 GiB of `int16` trellis data sits off the 16-byte grid and is copied into CUDA
+memory instead**; after re-laying at 64 bytes, none of it is. The `F8_E4M3` engram tables need only
+1-byte alignment and are aliased either way, which is why `--skip .engram.embed.` costs nothing.
+
+If you want that mode:
 
 ```bash
 python util/align_safetensors.py \
@@ -101,8 +112,9 @@ python util/align_safetensors.py \
 
 ### Already downloaded the pack?
 
-Nothing needs re-downloading. The re-lay is a local transform on bytes you already have. Check
-whether yours needs it at all:
+You need the `exllamav3/` overlay below; you probably do not need the re-lay. Nothing needs
+re-downloading either way, since the re-lay is a local transform on bytes you already have. To see
+what it would buy you:
 
 ```bash
 # from a clone of THIS recipe repo (the commands above run from the ExLlamaV3 checkout)
@@ -111,16 +123,19 @@ python one-spark-tp1/scripts/check_pack_alignment.py /models/DSV4.1-Flash-SAGE-E
 
 It parses the safetensors headers only, never loads weights and never writes, and reports how many
 GiB would land in unevictable CUDA memory instead of reclaimable page cache. It exits non-zero when
-a re-lay would help. Then run the `align_safetensors.py` command above with your existing directory
-as the source.
+a re-lay would change that. On the published pack it reports 67.41 GiB and exits 1 — which matters
+only if you intend to run fully aliased. If you do, run the `align_safetensors.py` command above
+with your existing directory as the source.
 
 - **No weight values change.** The re-lay only moves tensors onto a 64-byte grid and inserts
   `__align_pad__.*` filler. Nothing is requantized and model output is unaffected.
 - **Budget disk for the rewritten shards, not a second full copy.** Shards already on the grid are
   symlinked rather than duplicated.
 - **Keep the source directory.** The re-laid directory symlinks back into it.
-- **This is independent of the overlay below.** The overlay is additive and works with or without
-  the re-lay; the re-lay is purely about making the pack fit in 128 GB.
+- **This is independent of the overlay below**, and the overlay is the part you actually need. The
+  overlay is additive and works with or without the re-lay. The re-lay only changes whether weights
+  can be aliased from page cache, so it is invisible in the recommended config (which copies the
+  main model into CUDA anyway) and matters only in the fully-aliased low-memory mode.
 
 ## The EXL3 attention / MTP overlay
 

@@ -9,7 +9,11 @@
 set -euo pipefail
 
 VENV="${VENV:-$HOME/venvs/exl3_v41}"
-MODEL_DIR="${MODEL_DIR:?set MODEL_DIR to the 64-byte re-laid pack directory}"
+# The pack directory, with the exllamav3/ overlay parts copied in beside the shards.
+# A 64-byte re-laid pack is NOT required for this configuration: the main model is
+# copied into CUDA anyway, so tensor alignment is only consulted for the aliased
+# drafter. Re-laying matters for the fully-aliased low-memory mode. See ../README.md.
+MODEL_DIR="${MODEL_DIR:?set MODEL_DIR to the pack directory (base pack + exllamav3/ overlay)}"
 # Defaults to the interactive driver shipped next to this script. Point ENTRY at your own
 # ExLlamaV3 driver to run something else.
 ENTRY="${ENTRY:-$(dirname "$0")/chat_v41_gb10.py}"
