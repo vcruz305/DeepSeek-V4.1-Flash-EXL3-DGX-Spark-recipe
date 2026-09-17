@@ -3,7 +3,7 @@
 
 This is the driver script `run_tp1.sh` expects in $ENTRY:
 
-    MODEL_DIR=/models/DSV4.1-Flash-SAGE-EXL3-1.59bpw-a64 \
+    MODEL_DIR=/models/DSV4.1-Flash-SAGE-EXL3-1.59bpw \
     ENTRY=scripts/chat_v41_gb10.py \
       scripts/run_tp1.sh
 
@@ -12,8 +12,7 @@ tok/s and draft acceptance. Commands: /tokens N, /quit.
 
 Environment:
     MODEL_DIR   required, the pack directory (base pack plus the exllamav3/ overlay
-                parts copied in beside the shards). A 64-byte re-laid pack is not
-                required for this configuration; see ../README.md.
+                parts copied in beside the shards)
     EXL3_SRC    optional, path to an ExLlamaV3 source checkout to import instead of the
                 installed package (only needed if you did not `pip install .` the fork)
     CTX         context length (default 6144)
@@ -75,9 +74,8 @@ if PREWARM:
     for fd in fds.values():
         os.close(fd)
 
-# Chunk 2048 with the main model resident in CUDA (the fast config): 213-229 tok/s at 2-6k tokens.
-# Chunk 4096 is 10-12% faster only when the weights are aliased; with 107 GiB resident its
-# activations do not fit and the run is killed
+# Chunk 2048 with the main model resident in CUDA: 213-229 tok/s at 2-6k tokens. Chunk 4096's
+# activations do not fit alongside 107 GiB of resident weights and the run is killed.
 CHUNK = int(os.environ.get("CHUNK", "2048"))
 if DRAFT:
     generator = Generator(model = model, cache = cache, tokenizer = tokenizer, draft_model = draft,

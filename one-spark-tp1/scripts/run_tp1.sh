@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # One Spark (GB10) TP1 launcher for DeepSeek-V4.1-Flash EXL3 on native ExLlamaV3.
 #
-# Measured-best configuration: the main model is copied into CUDA memory and the DSpark drafter is
-# left aliased from page cache, because 107 GiB + ~14 GiB resident does not fit in 128 GB.
+# The main model is copied into CUDA memory and the DSpark drafter is left aliased, because
+# 107 GiB + ~14 GiB resident does not fit in 128 GB (measured: with aliasing off entirely the load
+# reaches 114.03 GiB and leaves 1.52 GiB, and is killed before the first token).
 #
 # Requires: ExLlamaV3 from vcruz305/exllamav3 @ feat/gb10-ats-load (954a8ca), built for aarch64.
-# See ../README.md for build, pack re-lay and measured numbers.
+# See ../README.md for build, the exllamav3/ overlay and measured numbers.
 set -euo pipefail
 
 VENV="${VENV:-$HOME/venvs/exl3_v41}"
 # The pack directory, with the exllamav3/ overlay parts copied in beside the shards.
-# A 64-byte re-laid pack is NOT required for this configuration: the main model is
-# copied into CUDA anyway, so tensor alignment is only consulted for the aliased
-# drafter. Re-laying matters for the fully-aliased low-memory mode. See ../README.md.
 MODEL_DIR="${MODEL_DIR:?set MODEL_DIR to the pack directory (base pack + exllamav3/ overlay)}"
 # Defaults to the interactive driver shipped next to this script. Point ENTRY at your own
 # ExLlamaV3 driver to run something else.
@@ -55,14 +53,14 @@ if [ "$avail" -lt "$MIN_AVAIL_KB" ]; then
   exit 4
 fi
 
-# ATS addressing mode is what makes zero-copy aliasing possible at all.
+# ATS addressing mode is what lets the drafter be aliased instead of copied.
 if command -v nvidia-smi >/dev/null 2>&1; then
   # awk exits at the first match, so nvidia-smi is killed by SIGPIPE while still
   # writing. Under `set -o pipefail` that is a fatal 141 and the launcher dies
   # before exec, so the failure is tolerated explicitly here.
   mode=$(nvidia-smi -q 2>/dev/null | awk -F: '/Addressing Mode/{gsub(/ /,"",$2); print $2; exit}' || true)
   if [ "${mode:-}" != "ATS" ]; then
-    echo "warning: addressing mode is '${mode:-unknown}', expected ATS; aliasing will fall back to copies" >&2
+    echo "warning: addressing mode is '${mode:-unknown}', expected ATS; the drafter cannot be aliased and the model will not fit" >&2
   fi
 fi
 

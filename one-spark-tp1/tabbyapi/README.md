@@ -49,8 +49,9 @@ export EXL3_ATS_COPY='^(?!mtp\.)'   # copy everything except the drafter into CU
 export EXL3_DSPARK_CONF=0.7
 ```
 
-Without `EXL3_ATS_COPY`, either everything is aliased (slower) or everything is copied (does not
-fit: ~107 GiB main model plus ~14 GiB drafter against 128 GB of unified memory).
+`EXL3_ATS_COPY` is what puts the main model in CUDA while leaving the drafter aliased. Without it
+everything is copied, which does not fit: ~107 GiB main model plus ~14 GiB drafter against 128 GB of
+unified memory. Measured with aliasing off entirely, the load reaches 114.03 GiB and leaves 1.52 GiB.
 
 ## Launcher
 
@@ -82,8 +83,7 @@ the measured-best native configuration.
 
 Two settings carry real consequences:
 
-- `chunk_size: 2048` — 4096 measured faster while weights were still aliased, but does not fit once
-  the model is resident in CUDA memory.
+- `chunk_size: 2048` — 4096's activations do not fit alongside the resident main model.
 - `tensor_parallel: false` — ExLlamaV3 tensor parallelism is single-host only (one
   `multiprocessing.Process` per *local* CUDA index, shared-memory payloads, `EXLLAMA_MASTER_ADDR`
   defaulting to `127.0.0.1`). It does not span two Sparks. TP2 and TP4 in this repository are the
@@ -96,9 +96,7 @@ Recorded rather than guessed:
 - Whether `draft_mode: mtp` needs `draft_model_name` set when the MTP head lives inside the main
   pack as `mtp.*` tensors.
 - Whether TabbyAPI's loader path preserves the `EXL3_ATS_COPY` placement split, or whether it
-  forces its own device placement and defeats the aliasing.
-- Whether TabbyAPI tolerates the `__align_pad__.*` tensors in a re-laid pack. The fork's loader
-  skips that prefix; TabbyAPI calls the same loader, so it should, but this is untested.
+  forces its own device placement and copies the drafter too, which would not fit.
 - Quantized KV (`cache_mode: "8,8"`) behaviour for this pack on GB10.
 
 Each of these is a real test, not a formality. Until they are run, treat this folder as a starting

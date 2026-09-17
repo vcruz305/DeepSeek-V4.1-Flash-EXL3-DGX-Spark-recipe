@@ -9,14 +9,14 @@ Single DGX Spark (GB10), no cluster, no vLLM.
 
 ## Why a separate path
 
-A 1.59 bpw DeepSeek-V4.1-Flash pack is roughly 107 GiB resident. One Spark has 128 GB of unified
-LPDDR5X shared between CPU and GPU. That fits, but only if the loader does not keep a second copy
-of the weights, and only if the drafter is not made resident alongside the main model.
+A 1.59 bpw DeepSeek-V4.1-Flash pack is roughly 107 GiB resident and the DSpark drafter adds about
+14 GiB. One Spark has 128 GB of unified LPDDR5X shared between CPU and GPU, so the main model fits
+in CUDA memory but the drafter cannot sit beside it.
 
-Native ExLlamaV3 on a GB10 can do this because the GPU runs in **ATS addressing mode**: it shares
-the process page tables and can read host virtual addresses directly, so weight tensors can be
-aliased straight out of a `mmap` of the safetensors files instead of being copied into CUDA
-allocations.
+Native ExLlamaV3 on a GB10 resolves that because the GPU runs in **ATS addressing mode**: it shares
+the process page tables and can read host virtual addresses directly. The main model is copied into
+CUDA and the drafter is aliased straight out of a `mmap` of the safetensors files, so both are
+reachable without a second copy of either.
 
 Confirm the mode before anything else:
 
@@ -70,73 +70,6 @@ python3 -c "import exllamav3, exllamav3_ext; print('ok')"
 > the AVX2 / AVX-512 target functions so the extension compiles on aarch64. Run it before
 > `pip install`; skipping it fails the build on x86 intrinsics.
 
-## Pack preparation: 64-byte re-lay (optional, and NOT needed for the fast config)
-
-**Read this first: for the configuration every measured number in this folder uses, you do not need
-to re-lay anything.** Download the pack, drop in the `exllamav3/` overlay described below, and run.
-Measured A/B, same benchmark, same settings, one run per pack layout:
-
-| pack layout | fresh 5-12 median | fresh 5-12 mean | repeats | acceptance |
-|---|---:|---:|---:|---:|
-| 64-byte re-laid + overlay | 17.29 | 18.32 | 20.12 – 24.68 | 0.889 |
-| **as published + overlay (no re-lay)** | **17.67** | **19.95** | **19.82 – 25.06** | **0.889** |
-
-Both loaded `torch_alloc 107.19 GiB` and reported `aliased/copied GiB [6.66, 0.0]`. The reason is in
-that second number: with `EXL3_ATS_COPY='^(?!mtp\.)'` the main model is copied into CUDA regardless
-of where its bytes sit, so tensor alignment is only ever consulted for the aliased drafter, and the
-overlay's drafter parts are already on the grid.
-
-The re-lay matters for the **fully-aliased** low-memory mode (`EXL3_ATS_MMAP=1`, no copy, 13.96–14.19
-tok/s), where weights stay reclaimable in page cache. There, counting every shard under the loader's
-own rule, **67.41 GiB of `int16` trellis data sits off the 16-byte grid and is copied into CUDA
-memory instead**; after re-laying at 64 bytes, none of it is. The `F8_E4M3` engram tables need only
-1-byte alignment and are aliased either way, which is why `--skip .engram.embed.` costs nothing.
-
-If you want that mode:
-
-```bash
-python util/align_safetensors.py \
-  /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw \
-  /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw-a64 \
-  --align 64 --min-bytes 1048576 --skip .engram.embed. --jobs 4
-```
-
-- Shards already on the grid are symlinked, not copied. Keep the source directory.
-- Gaps are filled with small `__align_pad__.<shard>.N` U8 tensors so each file stays a standard,
-  contiguous safetensors buffer. The loader on this branch skips that prefix.
-- Free disk equal to the rewritten shards is needed; ~20 minutes on NVMe for this model.
-- Full details: `doc/gb10_ats_loading.md` on the ExLlamaV3 fork branch.
-
-> Re-laid packs are **not** drop-in for other loaders. vLLM's `AutoWeightsLoader` rejects the pad
-> tensors unless it is told to ignore that prefix.
-
-### Already downloaded the pack?
-
-You need the `exllamav3/` overlay below; you probably do not need the re-lay. Nothing needs
-re-downloading either way, since the re-lay is a local transform on bytes you already have. To see
-what it would buy you:
-
-```bash
-# from a clone of THIS recipe repo (the commands above run from the ExLlamaV3 checkout)
-python one-spark-tp1/scripts/check_pack_alignment.py /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw
-```
-
-It parses the safetensors headers only, never loads weights and never writes, and reports how many
-GiB would land in unevictable CUDA memory instead of reclaimable page cache. It exits non-zero when
-a re-lay would change that. On the published pack it reports 67.41 GiB and exits 1 — which matters
-only if you intend to run fully aliased. If you do, run the `align_safetensors.py` command above
-with your existing directory as the source.
-
-- **No weight values change.** The re-lay only moves tensors onto a 64-byte grid and inserts
-  `__align_pad__.*` filler. Nothing is requantized and model output is unaffected.
-- **Budget disk for the rewritten shards, not a second full copy.** Shards already on the grid are
-  symlinked rather than duplicated.
-- **Keep the source directory.** The re-laid directory symlinks back into it.
-- **This is independent of the overlay below**, and the overlay is the part you actually need. The
-  overlay is additive and works with or without the re-lay. The re-lay only changes whether weights
-  can be aliased from page cache, so it is invisible in the recommended config (which copies the
-  main model into CUDA anyway) and matters only in the fully-aliased low-memory mode.
-
 ## The EXL3 attention / MTP overlay
 
 **Every measured number in this folder was produced with this overlay in place.** The published pack
@@ -155,7 +88,7 @@ hf download vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw \
 # the loader globs the pack directory root, non-recursively: the parts must sit
 # BESIDE model-*.safetensors, not in a subdirectory
 cp /models/overlay/exllamav3/requant_*.safetensors \
-   /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw-a64/
+   /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw/
 ```
 
 12 files, 10.61 GiB total. Notes:
@@ -163,16 +96,18 @@ cp /models/overlay/exllamav3/requant_*.safetensors \
 - The overlay is **additive**: its 7276 tensor names do not exist in the base shards, so nothing is
   shadowed and the order `glob` returns the files in does not matter. Modules take the trellis path
   when it is present and fall back to FP8 when it is not.
-- The parts are already on the 64-byte grid, so they need no second `align_safetensors.py` pass.
-- Their internal `__align_pad__.requant_part<N>.*` filler tensors are skipped by the loader.
+- The overlay parts carry their own `__align_pad__.requant_part<N>.*` filler tensors, which the
+  loader skips.
 - To rebuild rather than download, the fork branch carries
   `tests/deepseek_v41/requant_attn_exl3.py` and `tests/deepseek_v41/requant_mtp_exl3.py`.
 
 ## The configuration that actually fits
 
-The main model and the drafter cannot both be resident: 107 GiB + ~14 GiB exceeds the box.
-The measured-best configuration copies **everything except the drafter** into CUDA memory and
-leaves the drafter aliased in page cache:
+The main model and the drafter cannot both be resident in CUDA: 107 GiB + ~14 GiB exceeds the box.
+Measured directly — with aliasing disabled entirely (`EXL3_ATS_MMAP=0`) the load reaches
+`torch_alloc 114.03 GiB` and leaves 1.52 GiB of `MemAvailable`, and the memory guard kills it before
+the first token. So the configuration copies **everything except the drafter** into CUDA memory and
+leaves the drafter aliased:
 
 ```bash
 export EXL3_ATS_MMAP=1
@@ -197,8 +132,8 @@ See `scripts/run_tp1.sh` for the exact launcher, including a pre-flight `MemAvai
 | Field | Value |
 |---|---|
 | Runtime | native ExLlamaV3, fork `feat/gb10-ats-load` @ `954a8ca` |
-| Model | 64-byte re-laid build of `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` **plus the EXL3 attention / MTP overlay** (`exllamav3/` in that repo). The re-lay is reproduced with the command above; the overlay is a download. |
-| Model revision | `5dc954019183ab3d994b60433256001a3f1780e7` — the repo revision holding both the pack and the `exllamav3/` overlay. The measured runs used local files byte-identical to it; the re-lay is a local offset-only transform and changes no weight values. |
+| Model | `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` **plus the EXL3 attention / MTP overlay** (`exllamav3/` in that repo) |
+| Model revision | `5dc954019183ab3d994b60433256001a3f1780e7` — the repo revision holding both the pack and the `exllamav3/` overlay |
 | Topology | TP1, single Spark, one CUDA device |
 | Context | `CTX=6144`, prefill chunk as noted per row |
 | Batch | `max_batch_size=1`, single sequence |
@@ -212,15 +147,13 @@ Warm and cold are reported separately and are never combined (`AGENTS.md` benchm
 
 | Loading mode | Decode tok/s | Notes |
 |---|---:|---|
-| Fully aliased (`EXL3_ATS_MMAP=1`, no copy) | 13.96 – 14.19 | lowest memory, weights stay reclaimable |
-| Whole model copied into CUDA | **15.13 – 15.22** | load 37.5 s, ~107 GiB resident, +7.3% |
+| Main model in CUDA | **15.13 – 15.22** | load 37.5 s, ~107 GiB resident |
 
 ### Decode, DSpark drafter at confidence 0.7
 
 | Loading mode | Fresh prompt | Repeat prompt | Acceptance |
 |---|---:|---:|---:|
-| Aliased + drafter | 11.46 median | 16 – 17 warm | — |
-| **Main copied + drafter aliased** | **17.53 median** (mean 19.82) | **20.11 – 24.67** | 0.889 |
+| **Main in CUDA + drafter aliased** | **17.53 median** (mean 19.82) | **20.11 – 24.67** | 0.889 |
 | Interactive chat session | 11.8 cold | 17.4 warm | 0.74 |
 
 ### Prefill
@@ -230,7 +163,7 @@ Warm and cold are reported separately and are never combined (`AGENTS.md` benchm
 | Warm | 4096 | 254 – 261 | 4k – 6k |
 | Model in CUDA | 2048 | 154 – 229 | 2k – 6k |
 
-Chunk 4096 does not fit once the model is resident in CUDA; use 2048 there.
+Chunk 4096 does not fit once the main model is resident in CUDA; use 2048.
 
 ### Measured dead ends
 

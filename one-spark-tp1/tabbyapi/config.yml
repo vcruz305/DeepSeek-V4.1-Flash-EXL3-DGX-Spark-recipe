@@ -22,11 +22,11 @@ network:
 
 model:
   # Parent directory containing the model folder.
-  model_dir: /home/markus/models
+  model_dir: /models
 
-  # The 64-byte re-laid pack (see ../README.md "Pack preparation"). A pack that has NOT been
-  # re-laid will load, but most tensors will be copied instead of aliased and it will not fit.
-  model_name: DSV4.1-Flash-SAGE-EXL3-1.59bpw-a64
+  # The pack directory, with the exllamav3/ overlay parts copied in beside the shards
+  # (see ../README.md "The EXL3 attention / MTP overlay").
+  model_name: DSV4.1-Flash-SAGE-EXL3-1.59bpw
 
   # Matches the context used for the measured numbers.
   max_seq_len: 6144
@@ -36,8 +36,8 @@ model:
   # (e.g. "8,8") is untested for this pack on this hardware.
   cache_mode: FP16
 
-  # 2048 is correct once the model is resident in CUDA memory. 4096 measured faster when the
-  # weights were still aliased, but does not fit with the model copied in.
+  # 2048 is correct with the main model resident in CUDA memory: 4096's activations do not fit
+  # alongside it.
   chunk_size: 2048
 
   max_batch_size: 1
