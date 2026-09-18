@@ -239,6 +239,22 @@ One caveat outranks all of these:
   not the drafter mispredicting: acceptance stays between 0.85 and 0.99 while tokens yielded per
   forward fall from 5.4 to 1.9. Every published figure here comes from one repeated paragraph that
   lands mid-range. See `BENCHMARKS.md` and `scripts/prompt_variance.py`.
+- **Speculation is not output-exact.** Greedy decoding with the drafter does not always emit the
+  same tokens as greedy decoding without it. Of twelve prompts, 4 matched exactly, 4 differed by
+  an fp16 near-tie, and 4 differed where the target model clearly preferred another token, by as
+  much as 0.812 against 0.113. Plain greedy is self-deterministic, so this is not run noise, and
+  the acceptance logic is not the cause: the emitted token is always the target's own sampled
+  token. The batched verify window and single-token decode simply do not produce identical
+  logits. Throughput figures are unaffected. If you need output identical to the target model,
+  run without the drafter. See `BENCHMARKS.md` and `scripts/spec_exactness.py`.
+
+And one tuning knob turned out not to be a knob:
+
+- **The DSpark confidence gate is not a throughput lever.** Sweeping `EXL3_DSPARK_CONF` looked
+  like it mattered until output hashes were recorded. Changing the threshold changes the
+  generated text on most prompts, so most of the apparent effect was different continuations
+  rather than faster decoding of the same one. On prompts whose output is invariant the entire
+  span is 3 to 9%, at the noise floor and inconsistent in direction. `0.7` stays the default.
 
 ## TP1 vs TP2 / TP4 in this repo
 

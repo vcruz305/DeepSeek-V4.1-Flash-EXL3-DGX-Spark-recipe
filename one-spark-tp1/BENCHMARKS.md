@@ -88,8 +88,20 @@ Same harness and prompt, CTX=131072, warm repeats:
 | 0.85 | 32.46 | 0.967 |
 | 0.95 | 29.83 | 0.970 |
 
-0.7 is optimal. Lowering the gate to make more rounds draft does **not** help, and 0.95
-costs 10%. A 10-repetition run at 0.7 held 32.7-33.33 tok/s with no decay.
+0.7 is optimal on this prompt, and 0.95 costs 10%. A 10-repetition run at 0.7 held
+32.7-33.33 tok/s with no decay. The gate keeps the longest prefix of draft positions whose
+confidence clears the threshold, so raising it shortens the draft block and lowering it
+lengthens it. A threshold of 0 for a round means that round skips drafting entirely.
+
+> **This table is confounded, and the real effect is far smaller than it looks.** Changing
+> `EXL3_DSPARK_CONF` changes the generated text on most prompts, so these rows are not all
+> decoding the same output, and a row that looks faster may simply have produced an easier
+> continuation. Re-measured across six subjects with output hashes recorded: on the two
+> subjects whose text stayed identical across 0.5 / 0.7 / 0.9 the whole span was 9% and 3%,
+> in opposite directions and at the noise floor. Apparent large wins elsewhere, including a
+> 35% one, were different continuations rather than faster decoding of the same one. Treat
+> 0.7 as a sound default rather than a tuned optimum, and see "Speculation is not
+> output-exact" below for why the text moves at all.
 
 `EXL3_MOE_MIXED_BSZ1=1` produced no measurable gain (33.27 vs 33.33) and remains off by
 default; it also makes greedy output non-reproducible run to run.
@@ -259,6 +271,72 @@ Every headline figure in this file and in `README.md` comes from a single repeat
 lands mid-range. Treat the published decode numbers as one point on this distribution, not as a
 number your traffic will reproduce. To measure your own prompts, use
 [`scripts/prompt_variance.py`](scripts/prompt_variance.py), which produced the table above.
+
+## Speculation is not output-exact
+
+Greedy decoding with the DSpark drafter does not always emit the same tokens as greedy
+decoding without it. This is reproducible, it is a property of the speculative path on this
+pack, and it is worth knowing before these numbers are used to compare model quality.
+
+The control comes first, because without it nothing here is interpretable. **Plain greedy is
+self-deterministic**: two no-drafter runs of the same prompt produced identical token ids on
+every prompt tested, across separate processes and model loads. The differences below are
+therefore not run-to-run noise.
+
+Twelve prompts, 192 new tokens each, `EXL3_DSPARK_CONF=0.7`, each compared against the same
+prompt decoded with no drafter. Scored at the **first** differing token, where both sequences
+still share an identical prefix, so the no-drafter distribution at that position is
+conditioned on exactly the context the speculative run saw:
+
+| Outcome | Prompts | Meaning |
+|---|--:|---|
+| Identical output | 4 | speculation was exact |
+| Near-tie divergence | 4 | target top-1 and top-2 within 0.032, fp16 tie-breaking |
+| Clear-preference divergence | 4 | target preferred its top-1 by 0.137 to 0.699 |
+
+The margins fall into two groups with a 4x gap and nothing in between, so the split is in the
+data rather than in the choice of cutoff:
+
+```
+near ties          0.006  0.020  0.023  0.032
+clear preferences  0.137  0.179  0.587  0.699
+```
+
+In the largest case the no-drafter run assigned **0.812** to its top token while the
+speculative run emitted one the model gave **0.113**. In another the speculative run emitted
+the target's **third** choice at 0.092 against a top-1 of 0.694. Those are not rounding
+effects.
+
+**The acceptance logic is not the cause**, which is worth stating because it is the obvious
+suspect. A draft token is accepted only when it already equals the token sampled from the
+target's own verify logits:
+
+```python
+if draft_tokens[j, i].item() != sampled_token.item() or cp_boundary:
+    rejected = reject_remainder(job, j, i, batch_states)
+else:
+    job.accepted_draft_tokens += 1
+```
+
+The emitted token is always the target's sampled token, never the raw draft, so speculation
+cannot emit something the verify pass did not choose. The difference is upstream: **the
+target's logits in the batched verify window differ from its logits in single-token decode**.
+Those are not the same call. Verification runs the forward with `recurrent_history=True` plus
+the drafter's `draft_verifier_params`, over a multi-token window, on an architecture carrying
+recurrent state and a sparse-attention indexer. Which of those is responsible is **not**
+established here.
+
+What it means in practice:
+
+- Throughput figures in this file stand. They measure how fast tokens are produced, and that
+  is unaffected.
+- Any A/B that perturbs the numeric path can end up comparing different generated texts. That
+  is exactly what confounded the confidence-gate table above, and it is why output hashes
+  belong in any future comparison on this stack.
+- If you need output identical to the target model, run without the drafter and accept
+  15.13 to 15.22 tok/s.
+
+Reproduce with [`scripts/spec_exactness.py`](scripts/spec_exactness.py).
 
 ## Measured negative results
 
