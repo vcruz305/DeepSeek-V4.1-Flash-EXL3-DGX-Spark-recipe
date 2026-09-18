@@ -151,6 +151,115 @@ acceptance, or faster trellis kernels, rather than better host-side scheduling.
 > `aten::mm` carries the device time of the kernels listed separately beneath it. Wall-clock
 > injection is the instrument that works here.
 
+## Engram row prefetch
+
+Engram gathers FP8 n-gram rows on every forward. The prefetch reads the rows it is about to need on
+the host first, so their pages enter the page cache in parallel instead of the GPU faulting on them
+one page at a time. It is **on by default**. Both `_gather` return values are discarded, so it is a
+page-cache hint and cannot change output, which makes it safe to disable on correctness grounds.
+
+Two workload shapes were measured separately, because they disagree. Per `AGENTS.md` rule 9 this is
+an explicit Engram variant, not part of the baseline: every other figure in this file was produced
+with the prefetch at its default.
+
+### Repeated prompt: prefetch off is faster
+
+Same harness as the tables above, four runs in one session, strictly alternating to control for
+drift:
+
+| Run | `EXL3_ENGRAM_PREFETCH` | ms/token | tok/s |
+|---:|---|---:|---:|
+| 1 | 1 (default) | 30.721 | 32.55 |
+| 2 | **0** | 29.737 | **33.63** |
+| 3 | 1 (default) | 30.607 | 32.67 |
+| 4 | **0** | 29.713 | **33.66** |
+
+**+3.2%.** Both off runs beat both on runs with no overlap, and the strict alternation means session
+drift cannot produce that ordering. This is exactly the regime this harness measures: one prompt
+repeated, so the rows are already resident, the gather finds every page present, and its work plus a
+per-layer host sync is pure overhead.
+
+### Varied prompts: a wash, and the statistic decides the sign
+
+Six distinct subjects, one per generation, 255 new tokens and ~1900 prompt tokens each, so no
+generation reuses the previous one's rows. Median and mean over the same six reps:
+
+| Run | `EXL3_ENGRAM_PREFETCH` | median ms/tok | mean ms/tok |
+|---:|---|---:|---:|
+| 1 | 1 (default) | 42.819 | 51.837 |
+| 2 | 0 | **41.671** | 53.448 |
+| 3 | 1 (default) | 37.953 | **48.078** |
+| 4 | 0 | **37.521** | 51.475 |
+
+Off wins on median in both pairs and loses on mean in both pairs, so on varied traffic this is a
+wash rather than a win. A single subject causes the entire disagreement: on the marine-biology
+prompt the prefetch is worth 14 to 20 ms/token (62.10 and 67.86 with it on, 80.89 and 81.69 with it
+off), which is the cold-row case the prefetch exists for. On the other five subjects off is level or
+slightly ahead. The mean carries that one subject and the median discards it.
+
+Compare only within pairs. Runs 3 and 4 are faster than runs 1 and 2 on nearly every subject
+regardless of the setting, which is the page cache warming across the session.
+
+## Decode speed varies 2x to 3x with prompt subject
+
+This is the most consequential caveat in this file, and it applies to every other number in it.
+
+Same process, same settings, same drafter, ~1900 prompt tokens and 255 new tokens per generation.
+Only the subject of the prompt changes:
+
+| Subject | ms/token (4 runs) | tok/s |
+|---|---|---:|
+| Legal systems and precedent | 31.38, 32.05, 32.09, 33.10 | 30.2 – 31.9 |
+| Orbital mechanics | 31.62, 31.71, 31.77, 38.75 | 25.8 – 31.6 |
+| Bread fermentation | 32.76, 33.41, 33.87, 34.59 | 28.9 – 30.5 |
+| History of computing | 41.63, 42.04, 46.88, 48.76 | 20.5 – 24.0 |
+| Marine biology / hydrothermal vents | 62.10, 67.86, 80.89, 81.69 | 12.2 – 16.1 |
+| Medieval trade routes | 85.75, 88.33, 92.71, 93.31 | 10.7 – 11.7 |
+
+**31.4 ms/token to 93.3 ms/token in that session**, a factor of 3.0 at identical prompt length and
+settings. A later session over the same six prompts, with the page cache warmed by the runs above,
+was faster throughout and spanned 31.9 to 69.8 ms/token, a factor of 2.2. Absolute values move with
+page-cache warmth between sessions; the grouping does not. Three subjects sit together near 32 ms,
+computing sits mid-range, and marine biology and medieval trade are slowest in every run.
+
+### Why: the confidence gate, not draft quality
+
+Instrumenting the same six prompts for draft accounting separates the two candidate explanations.
+`tokens_per_round` is total new tokens divided by the number of verify rounds, so it is how many
+tokens each forward actually yields. One process, `EXL3_DSPARK_CONF=0.7`, block size 5:
+
+| Subject | ms/token | acceptance | tokens/round | ms/round |
+|---|---:|---:|---:|---:|
+| Orbital mechanics | 31.93 | 0.986 | 5.447 | 173.9 |
+| Bread fermentation | 32.66 | 0.931 | 4.830 | 157.8 |
+| Legal systems and precedent | 32.89 | 0.953 | 4.923 | 161.9 |
+| History of computing | 45.44 | 0.984 | 3.556 | 161.6 |
+| Marine biology / hydrothermal vents | 61.69 | 0.847 | 2.081 | 128.4 |
+| Medieval trade routes | 69.84 | 0.930 | 1.869 | 130.5 |
+
+Acceptance is **not** the variable. It stays between 0.85 and 0.99 everywhere and it does not track
+speed: medieval trade has higher acceptance than marine biology, 0.930 against 0.847, and is still
+the slowest subject of the six. The drafter is not guessing wrong on the hard prompts.
+
+`tokens_per_round` is the variable. It moves 2.9x, from 5.447 down to 1.869, and tracks ms/token
+almost exactly inversely, because ms/token is just `ms_per_round / tokens_per_round` and
+`ms_per_round` moves only 1.4x. On less predictable text the confidence gate stops the draft block
+early, so fewer tokens come out of each forward and throughput falls in proportion. The drafter is
+being allowed to guess less, rather than guessing badly.
+
+That also explains why `ms_per_round` *rises* as `tokens_per_round` rises: a longer accepted block
+means more drafter steps and a wider verify batch, so each round costs more GPU work while costing
+much less per token. This is consistent with the saturation result above.
+
+One open question follows from it. The confidence sweep earlier in this file found 0.7 optimal on a
+single prompt, which lands in the fast group. Whether the optimum is subject-dependent was not
+measured, and on the slow subjects a lower gate might trade acceptance for block length favourably.
+
+Every headline figure in this file and in `README.md` comes from a single repeated paragraph, which
+lands mid-range. Treat the published decode numbers as one point on this distribution, not as a
+number your traffic will reproduce. To measure your own prompts, use
+[`scripts/prompt_variance.py`](scripts/prompt_variance.py), which produced the table above.
+
 ## Measured negative results
 
 Recorded so they are not re-tried. Same runtime identity as above.
@@ -171,9 +280,30 @@ Recorded so they are not re-tried. Same runtime identity as above.
 | Two concurrent streams | 19.12 tok/s aggregate without a drafter, below single-stream with one; with the drafter it raises `RuntimeError` | does not help single-stream |
 | Re-sweeping the int8 GEMV work decomposition on this GPU (the constants are tuned for a 3090; GB10 has 48 SMs) | paired in one session: shipped default 32.56 tok/s, best swept grid 32.70; under 0.8 tok/s spread across a 5x range of grid sizes | null; the default `maxb * num_sms` already lands on the optimum |
 | Deeper speculation, raising the draft block from 5 (`Generator(num_draft_tokens=N)` with `dspark_block_size` to match) | one session, same prompt: block 5 gives 32.69 tok/s at 0.958 acceptance, block 6 gives 32.27 at 0.921, block 8 gives 30.25 at 0.833; generated text identical at all three | **5 is optimal**; acceptance falls monotonically past the block size the drafter was trained at |
+| `EXL3_INT8_GEMV=0`, disabling the int8 GEMV path entirely | paired in one session: 32.57 tok/s baseline, 30.37 with it off, **−6.8%** | keep the default; this lever inverts on this pack |
+| `EXL3_INT8_GEMV=1` (residual int8 mode; the default is 2, plain int8) | 31.90 vs 32.50 baseline, −1.8% | keep the default |
+| `EXL3_MGEMM_N_THRESHOLD` lowered to 2048 / 4096 from its 8192 default | 32.59 / 32.46 against a 32.50 baseline, +0.3% / −0.1% | null; inside run-to-run noise |
+| `EXL3_ENGRAM_ATS=0` | 32.45 vs 32.50 baseline, −0.2% | null; inside run-to-run noise |
+| Pinning the process to the big-core cluster with `taskset` | 32.83 vs 32.57 baseline, +0.8%; combined with `EXL3_INT8_GEMV=0` it reaches only 30.84, still well below baseline | null; inside noise, and it cannot rescue the int8 result |
+| Porting a batched-MTP-verify, device-resident draft chain and GPU-side embedding change set from a sibling EXL3 recipe | four paired runs in one session: 32.60 unpatched, 32.54 patched, 32.55 patched with its own knobs off, 32.60 patched again | **null**; reverted, not carried into this recipe |
+| The cooperative fused-MoE kernel (`exl3_moe_coop`) | it takes one `Kg` / `Ku` / `Kd` per launch; 834 of 15360 experts in this pack have `Kg != Ku`, and gate widths span 4 distinct K values inside a single layer, so no single launch can cover a layer | **structurally closed to this pack** |
 
 The grouped-MoE result is the important one: an exact per-slot mgemm loses to the int8 GEMV path on
 this hardware, so reducing kernel launch count did not help.
+
+The last seven rows came from porting every portable tuning lever off a sibling ExLlamaV3 EXL3
+recipe running a different model on this same hardware. **None of them transferred.** The int8 GEMV
+switch transferred with its sign reversed, costing 6.8% here; the threshold, affinity and ATS knobs
+were null; the source-level change set was null across four paired runs; and the cooperative MoE
+kernel cannot be called on this pack at all. The one lever that did pay is in "Engram row prefetch"
+above, and it was found here rather than ported.
+
+Mixed-K is why, and it is worth stating plainly because it closes a whole class of future work. This
+pack stores every expert at its own bit width. That is what buys 1.59 bpw at usable quality, and it
+is also what makes every uniform-width fast path in the library unreachable: the fused MoE path, the
+uniform-K repack, and the cooperative kernel all require one quantization per launch. A recipe for a
+uniform-K pack will hand you levers that this pack structurally cannot use, so measure before
+porting rather than after.
 
 The GEMV sweep is the other one worth reading. Since the decode is GPU-bound, the remaining lever
 would have to be the kernels themselves, and the int8 GEMV path is already close to its floor: it

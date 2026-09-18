@@ -126,6 +126,29 @@ decode as 6,144, and 262,144 costs about 1 tok/s. `CTX` must be a multiple of 25
 `EXL3_ATS_COPY` takes a regex matched against tensor names; matching tensors are copied into CUDA
 memory, the rest stay aliased. The negative lookahead above is the whole trick.
 
+### Optional: Engram row prefetch
+
+Engram row prefetch is **on by default** (`exllamav3/modules/engram.py` reads
+`EXL3_ENGRAM_PREFETCH`, defaulting to `1`) and is left on in every figure in `BENCHMARKS.md`.
+Disabling it is a measured win on repeated prompts and a wash on varied ones, so it is published as
+an explicit variant rather than folded into the block above, per `AGENTS.md` rule 9:
+
+```bash
+export EXL3_ENGRAM_PREFETCH=0    # repeated or highly similar prompts: +3.2% decode
+```
+
+Use it when the same prompt or prompt prefix is served repeatedly: a benchmark loop, a fixed system
+prompt, or a long session on one topic. Leave it at the default for varied traffic.
+
+The mechanism explains both halves. The prefetch reads the gathered Engram rows on the host so their
+pages enter the page cache before the GPU faults on them one page at a time. When those pages are
+already resident the gather finds everything present, so it and its per-layer host sync are pure
+overhead. When the rows are genuinely cold it earns its cost back, and on one of the six varied
+subjects tested it earned back far more than it cost.
+
+It cannot change output. Both `_gather` return values are discarded, so the call is a page-cache
+hint and nothing else. See `BENCHMARKS.md` for the paired measurements and the varied-prompt caveat.
+
 Load takes ~40 s and drives `MemAvailable` down to roughly 5 GiB, which is expected. Do not run a
 second model process alongside it.
 
@@ -202,6 +225,20 @@ Recorded so they are not re-tried:
 - **Concurrent streams**: two streams without a drafter aggregate 19.12 tok/s, *below* single-stream
   with the drafter, and two streams with the drafter raise a `RuntimeError` in the recurrent state.
   Concurrency does not raise single-stream throughput here.
+- **Tuning levers ported from a sibling ExLlamaV3 EXL3 recipe on this same hardware**: none of them
+  transferred. `EXL3_INT8_GEMV=0` costs 6.8% here rather than gaining, `EXL3_INT8_GEMV=1` costs 1.8%,
+  and `EXL3_MGEMM_N_THRESHOLD`, `EXL3_ENGRAM_ATS=0` and big-core `taskset` pinning are all inside
+  run-to-run noise. A ported source-level change set measured null across four paired runs and was
+  reverted, and the cooperative fused-MoE kernel cannot be called on a mixed-K pack at all. Mixed-K
+  is the reason, and it closes every uniform-width fast path in the library. See `BENCHMARKS.md`.
+
+One caveat outranks all of these:
+
+- **The subject of the prompt changes decode speed by 2x to 3x**, at identical prompt length and
+  settings. The cause is the confidence gate shortening the draft block on less predictable text,
+  not the drafter mispredicting: acceptance stays between 0.85 and 0.99 while tokens yielded per
+  forward fall from 5.4 to 1.9. Every published figure here comes from one repeated paragraph that
+  lands mid-range. See `BENCHMARKS.md` and `scripts/prompt_variance.py`.
 
 ## TP1 vs TP2 / TP4 in this repo
 
