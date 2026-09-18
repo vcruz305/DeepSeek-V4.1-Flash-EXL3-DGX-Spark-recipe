@@ -166,9 +166,18 @@ Recorded so they are not re-tried. Same runtime identity as above.
 | Repacking to uniform K to reach the fused path | routed-expert weights go from ~101 GiB to ~268 GiB levelled up, ~126 GiB at an intermediate uniform K, against 119.2 GiB of unified memory before drafter, cache and OS | **does not fit** |
 | Device-indexed MoE dispatch, to remove the per-layer host sync | the sync is real (40.5 per token) but costs no wall time: injected GPU work is paid in full from the first increment | **not worth building** |
 | Two concurrent streams | 19.12 tok/s aggregate without a drafter, below single-stream with one; with the drafter it raises `RuntimeError` | does not help single-stream |
+| Re-sweeping the int8 GEMV work decomposition on this GPU (the constants are tuned for a 3090; GB10 has 48 SMs) | paired in one session: shipped default 32.56 tok/s, best swept grid 32.70; under 0.8 tok/s spread across a 5x range of grid sizes | null; the default `maxb * num_sms` already lands on the optimum |
 
 The grouped-MoE result is the important one: an exact per-slot mgemm loses to the int8 GEMV path on
 this hardware, so reducing kernel launch count did not help.
+
+The GEMV sweep is the other one worth reading. Since the decode is GPU-bound, the remaining lever
+would have to be the kernels themselves, and the int8 GEMV path is already close to its floor: it
+never materializes fp16 at all. The `u32` product of the extracted trellis word and the codebook
+constant *is* four int8 codebook values, consumed directly by `dp4a` against int8-quantized
+activations, so a 32-weight block costs roughly 8 integer multiplies plus 8 `dp4a`. Reducing that
+meaningfully is not a tuning exercise. Note also that the GEMV path is gated to `size_m <= 2`, so it
+serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gemm` / `exl3_mgemm`.
 
 ## Not measured here
 
@@ -180,3 +189,7 @@ this hardware, so reducing kernel launch count did not help.
 - **TabbyAPI throughput.** Not run end-to-end against this pack. See `tabbyapi/README.md`.
 - **Quantized KV**, and CUDA-graph capture for the heterogeneous mixed-K path. Long context *is*
   measured above, to 262,144.
+- **GPU counter profiling.** Nsight Compute is installed on this host but returns
+  `ERR_NVGPUCTRPERM` for a non-admin user, so per-kernel stall reasons and achieved occupancy could
+  not be collected. Throughput figures here are wall-clock; the kernel launch and host-sync counts
+  come from CUPTI activity tracing, which needs no counter permissions.
