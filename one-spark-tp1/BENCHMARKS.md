@@ -188,8 +188,13 @@ serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gem
   multi-host worker. It does not span two Sparks, so no cross-node native numbers exist to publish.
   TP2 and TP4 in this repository are the vLLM path.
 - **TabbyAPI throughput.** Not run end-to-end against this pack. See `tabbyapi/README.md`.
-- **Quantized KV**, and CUDA-graph capture for the heterogeneous mixed-K path. Long context *is*
-  measured above, to 262,144.
+- **Quantized KV.** Long context *is* measured above, to 262,144.
+- **CUDA-graph capture is not an open item.** The batched decode graph
+  (`EXL3_DSV4_BATCH_GRAPH`) defaults to on, so it is already active in every figure above, for
+  the sliding-window layers, which are the ones this architecture builds on `DSV4Attention`. The
+  remaining V4.1 layers use `DSV41Attention`, which has no graph path at all, and the grouped-MoE
+  graph modes are measured and rejected in the table above. There is no unexploited graph setting
+  on this path.
 - **GPU counter profiling.** Nsight Compute is installed on this host but returns
   `ERR_NVGPUCTRPERM` for a non-admin user, so per-kernel stall reasons and achieved occupancy could
   not be collected. Throughput figures here are wall-clock; the kernel launch and host-sync counts
