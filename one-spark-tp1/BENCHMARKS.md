@@ -118,7 +118,9 @@ because there is no idle GPU time for the host to fill.
 Measured by injecting a known quantity of pure GPU work into every MoE layer and reading
 wall-clock decode only, with no profiler involved. One 2048×2048 fp16 `mm`, calibrated at **0.1927 ms** on
 an otherwise idle device. One process, one load, three generations per level, `N=0` measured
-again last as a drift check:
+again last as a drift check. As with the context and confidence tables above, these are **warm
+repeated-prompt** figures and are **not** comparable to the fresh-prompt numbers under "Decode,
+DSpark drafter": they isolate the cost of added GPU work, not a realistic workload.
 
 | injections / layer | ms/token | Δ vs `N=0` | Δ per injection |
 |---:|---:|---:|---:|
@@ -138,7 +140,8 @@ block size 5 at 0.889 acceptance actually produces.
 
 This single result explains the rest of this file: the grouped CUDA-graph modes were slower,
 `EXL3_MOE_MIXED_BSZ1` gained nothing, and every configuration tried landed between 29.8 and
-33.4 tok/s. Going faster needs **less GPU work per token**, meaning a smaller pack, higher draft
+33.4 tok/s **on warm repeats**, where the recommended configuration's fresh-prompt median is
+17.53. Going faster needs **less GPU work per token**, meaning a smaller pack, higher draft
 acceptance, or faster trellis kernels, rather than better host-side scheduling.
 
 > **Methodology note.** `torch.profiler` cannot measure occupancy on this workload. It issues
