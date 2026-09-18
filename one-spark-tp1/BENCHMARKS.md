@@ -108,6 +108,46 @@ at non-singleton dimension 1.  Target sizes: [6, 2036].  Tensor sizes: [6, 2034]
 speculation combined with concurrency does not. Single stream with the drafter is the
 supported configuration.
 
+## The decode is GPU-bound, and that is what sets the ceiling
+
+The per-expert MoE dispatch does synchronize with the host. A CUDA profile over 63 tokens
+counted 2550 `cudaStreamSynchronize`, or 40.5 per token against exactly 40 MoE layers, so the
+per-layer readback is real and fires on every forward. Removing it would still gain nothing,
+because there is no idle GPU time for the host to fill.
+
+Measured by injecting a known quantity of pure GPU work into every MoE layer and reading
+wall-clock decode only, with no profiler involved. One 2048×2048 fp16 `mm`, calibrated at **0.1927 ms** on
+an otherwise idle device. One process, one load, three generations per level, `N=0` measured
+again last as a drift check:
+
+| injections / layer | ms/token | Δ vs `N=0` | Δ per injection |
+|---:|---:|---:|---:|
+| 0 | 30.648 | n/a | n/a |
+| 1 | 32.469 | +1.821 | 1.821 |
+| 2 | 34.240 | +3.591 | 1.796 |
+| 4 | 37.537 | +6.889 | 1.722 |
+| 8 | 43.542 | +12.894 | 1.612 |
+| 16 | 55.947 | +25.298 | 1.581 |
+| 0 (repeat) | 30.751 | +0.103 | n/a |
+
+A device with idle gaps absorbs the first increments, so its curve stays flat and then bends.
+This one is **linear from the first increment**: injected work is paid in full, immediately,
+which is only possible on a saturated device. The slope is self-checking: injected work per
+verify round divided by 1.821 ms/token implies ~4.2–4.8 tokens per forward, which is what
+block size 5 at 0.889 acceptance actually produces.
+
+This single result explains the rest of this file: the grouped CUDA-graph modes were slower,
+`EXL3_MOE_MIXED_BSZ1` gained nothing, and every configuration tried landed between 29.8 and
+33.4 tok/s. Going faster needs **less GPU work per token**, meaning a smaller pack, higher draft
+acceptance, or faster trellis kernels, rather than better host-side scheduling.
+
+> **Methodology note.** `torch.profiler` cannot measure occupancy on this workload. It issues
+> 620+ kernel launches per token, so CUPTI per-kernel overhead swamps the signal and reports
+> impossible figures (GPU busy 136–144% of wall, negative idle). Summing
+> `self_device_time_total` across `key_averages()` also double-counts, because a parent
+> `aten::mm` carries the device time of the kernels listed separately beneath it. Wall-clock
+> injection is the instrument that works here.
+
 ## Measured negative results
 
 Recorded so they are not re-tried. Same runtime identity as above.
@@ -122,6 +162,10 @@ Recorded so they are not re-tried. Same runtime identity as above.
 | Forcing a minimum draft length | slower | rejected |
 | Draft early-exit | neutral | not enabled |
 | `EXL3_MOE_MIXED_BSZ1=1` | ~5% warm decode, **greedy output not reproducible run to run** | **do not use** |
+| Raising `EXL3_MOE_FUSED_ROWS` / `EXL3_MOE_FUSED_ROWS_WIDE` | no effect: the MTP verify shape is 36 rows, already inside both defaults (128 / 256), so the row cap was never the constraint | not a lever |
+| Repacking to uniform K to reach the fused path | routed-expert weights go from ~101 GiB to ~268 GiB levelled up, ~126 GiB at an intermediate uniform K, against 119.2 GiB of unified memory before drafter, cache and OS | **does not fit** |
+| Device-indexed MoE dispatch, to remove the per-layer host sync | the sync is real (40.5 per token) but costs no wall time: injected GPU work is paid in full from the first increment | **not worth building** |
+| Two concurrent streams | 19.12 tok/s aggregate without a drafter, below single-stream with one; with the drafter it raises `RuntimeError` | does not help single-stream |
 
 The grouped-MoE result is the important one: an exact per-slot mgemm loses to the int8 GEMV path on
 this hardware, so reducing kernel launch count did not help.
@@ -134,5 +178,5 @@ this hardware, so reducing kernel launch count did not help.
   multi-host worker. It does not span two Sparks, so no cross-node native numbers exist to publish.
   TP2 and TP4 in this repository are the vLLM path.
 - **TabbyAPI throughput.** Not run end-to-end against this pack. See `tabbyapi/README.md`.
-- **Long context beyond 6144**, quantized KV, and CUDA-graph capture for the heterogeneous mixed-K
-  path.
+- **Quantized KV**, and CUDA-graph capture for the heterogeneous mixed-K path. Long context *is*
+  measured above, to 262,144.

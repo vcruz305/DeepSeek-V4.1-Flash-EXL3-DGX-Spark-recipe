@@ -184,6 +184,24 @@ Recorded so they are not re-tried:
 - **Draft early-exit**: neutral.
 - **`EXL3_MOE_MIXED_BSZ1=1`**: ~5% warm decode but greedy output was **not reproducible run to run**.
   Do not use it.
+- **Raising the fused-MoE row caps** (`EXL3_MOE_FUSED_ROWS`, `EXL3_MOE_FUSED_ROWS_WIDE`): no effect.
+  The sync-free fused path requires both allocated fused buffers *and*
+  `num_tokens * top_k <= fused_rows`. At MTP verify shapes that product is 36, already inside both
+  defaults (128 and 256), so the caps were never the binding constraint. The buffers are what is
+  absent: the fused kernel takes one quantization per launch, and this pack is per-expert mixed K,
+  so every layer takes the dense per-expert path. The engine reports this at load:
+  `Mixed-K experts in layers.N.ffn: dense per-expert path`, 40 of 40.
+- **Repacking to uniform K to reach that path**: does not fit. Measured from the shipped tensor
+  sizes, levelling each layer's experts up to that layer's largest K takes the routed-expert weights
+  from ~101 GiB to ~268 GiB, and an intermediate uniform K still lands near ~126 GiB, against
+  119.2 GiB of unified memory before the drafter, cache and OS. Levelling down fits but discards the
+  mixed-K allocation.
+- **Eliminating the per-layer host syncs** (a device-indexed MoE dispatch): measured **not worth
+  building**. The syncs are real, at 40.5 `cudaStreamSynchronize` per token against 40 MoE
+  layers, but they cost no wall time, because the GPU is already saturated. See `BENCHMARKS.md`.
+- **Concurrent streams**: two streams without a drafter aggregate 19.12 tok/s, *below* single-stream
+  with the drafter, and two streams with the drafter raise a `RuntimeError` in the recurrent state.
+  Concurrency does not raise single-stream throughput here.
 
 ## TP1 vs TP2 / TP4 in this repo
 
