@@ -4,18 +4,111 @@ Serving and qualification tooling for **DeepSeek-V4.1-Flash EXL3** on NVIDIA DGX
 
 > vLLM owns the DeepSeek-V4.1 model graph. `vllm-exl3` owns EXL3 routed-expert storage/execution. ExLlamaV3 supplies EXL3 kernels; it is not the V4.1 graph owner.
 
+## Measured performance
+
+One Spark, `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` plus the `exllamav3/` attention/MTP overlay:
+
+| Measurement | Result |
+|---|---:|
+| Decode, no drafter | **15.13 – 15.22 tok/s** |
+| Decode, DSpark drafter, fresh prompt | **17.53 median**, 19.82 mean |
+| Decode, DSpark drafter, repeat prompt | **20.11 – 24.67 tok/s** |
+| Draft acceptance | 0.889 |
+| Prefill, chunk 4096 | 254 – 261 tok/s |
+| Load time, resident size | 37.5 s, ~107 GiB |
+
+Runtime identity for every figure above, per `AGENTS.md` rule 8: 1 × DGX Spark (GB10), 128 GB unified
+LPDDR5X, ATS addressing mode; **native ExLlamaV3** (not vLLM, not `vllm-exl3`) from
+`vcruz305/exllamav3` branch `feat/gb10-ats-load` at `954a8ca6e59d`; CUDA 13.0,
+`TORCH_CUDA_ARCH_LIST=12.1a`; `DeepseekV41ForCausalLM`; model revision
+`5dc954019183ab3d994b60433256001a3f1780e7`; TP1, one local CUDA device; `CTX=6144`;
+`max_batch_size=1`, single sequence; DSpark/MTP block drafting at `EXL3_DSPARK_CONF=0.7`, block size
+5; per-expert mixed K (K1–K6).
+
+On a repeated prompt the same configuration reaches about 33 tok/s warm, and context is nearly free
+(131,072 measures the same warm decode as 6,144). Those are best-case prefix-cache figures and are
+**not** comparable to the fresh-prompt numbers above. Full tables, methodology and the measured
+negative results are in [`one-spark-tp1/BENCHMARKS.md`](one-spark-tp1/BENCHMARKS.md).
+
+**TP2 and TP4 have no measured serving numbers.** Both are in qualification; see
+[Which path do I need](#which-path-do-i-need).
+
 ## Contents
 
-- [Which path do I need](#which-path-do-i-need): start here
-- [One Spark (TP1)](#one-spark-tp1): the only measured serving path today
-- [Validation-first workflow](#validation-first-workflow): TP2 and TP4, steps 1 to 7
+- [Measured performance](#measured-performance)
+- [Quick start (one Spark)](#quick-start-one-spark)
+- [Which path do I need](#which-path-do-i-need)
+- [TP2 and TP4 qualification](#tp2-and-tp4-qualification): the seven-step workflow
 - [TP4 release boundary](#tp4-release-boundary)
 - [TP2 active qualification](#tp2-active-qualification)
 - [Architecture target](#architecture-target): expert geometry per layout
 - [Locked runtime](#locked-runtime): the pin and what it contains
-- [Documentation map](#documentation-map): every file in `docs/`
+- [Documentation map](#documentation-map): every file in `docs/` and `overlays/`
 - [Repository layout](#repository-layout)
 - [License](#license)
+
+## Quick start (one Spark)
+
+This is the only path with measured serving numbers. It runs **native ExLlamaV3**, so it does not use
+`runtime.lock.json` and does not advance it. [`one-spark-tp1/README.md`](one-spark-tp1/README.md) is
+the authoritative version of these steps; if the two ever disagree, that file wins.
+
+**1. Confirm the GPU is in ATS addressing mode.** Zero-copy aliasing depends on it.
+
+```bash
+nvidia-smi -q | grep -i "addressing mode"
+    Addressing Mode                   : ATS
+```
+
+**2. Build ExLlamaV3 from the fork branch.** The aarch64 patch must run before `pip install`, or the
+build fails on x86 intrinsics.
+
+```bash
+git clone https://github.com/vcruz305/exllamav3.git
+cd exllamav3
+git checkout 954a8ca6e59d
+
+python3 -m venv ~/venvs/exl3_v41
+source ~/venvs/exl3_v41/bin/activate
+
+curl -fsSL -o util/patch_exllamav3_aarch64.py \
+  https://raw.githubusercontent.com/vcruz305/vllm-exl3/28c3585620df228de07e6f5115fbdc82877ba888/tools/patch_exllamav3_aarch64.py
+python3 util/patch_exllamav3_aarch64.py exllamav3/exllamav3_ext
+
+CUDA_HOME=/usr/local/cuda-13.0 TORCH_CUDA_ARCH_LIST=12.1a MAX_JOBS=8 \
+  pip install --no-build-isolation --no-deps .
+```
+
+**3. Add the EXL3 attention/MTP overlay.** Every measured number depends on it. Without it you are
+running the FP8 attention path.
+
+```bash
+hf download vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw \
+  --revision 5dc954019183ab3d994b60433256001a3f1780e7 \
+  --include 'exllamav3/*' --local-dir /models/overlay
+
+# the parts must sit BESIDE model-*.safetensors, not in a subdirectory
+cp /models/overlay/exllamav3/requant_*.safetensors \
+   /models/DSV4.1-Flash-SAGE-EXL3-1.59bpw/
+```
+
+**4. Use the placement split that fits.** 107 GiB of main model plus ~14 GiB of drafter does not fit
+in 128 GB, so everything except the drafter is copied into CUDA and the drafter stays aliased.
+
+```bash
+export EXL3_ATS_MMAP=1
+export EXL3_ATS_COPY='^(?!mtp\.)'     # copy every tensor NOT starting with "mtp."
+export EXL3_DSPARK_CONF=0.7           # measured optimum
+export CHUNK=2048                     # 4096 does not fit once the model is resident
+export CTX=6144                       # raise freely; must be a multiple of 256
+```
+
+**5. Launch.** `scripts/run_tp1.sh` in that folder is the exact launcher, including a pre-flight
+`MemAvailable` check. Load takes about 40 s and drives `MemAvailable` to roughly 5 GiB, which is
+expected. Do not run a second model process alongside it.
+
+For **two or four Sparks**, skip this section and start at
+[TP2 and TP4 qualification](#tp2-and-tp4-qualification).
 
 ## Which path do I need
 
@@ -23,26 +116,15 @@ Serving and qualification tooling for **DeepSeek-V4.1-Flash EXL3** on NVIDIA DGX
 |---|---|---|
 | **TP4 / 4× Spark** | `vcruz305/DSV4.1-Flash-EXL3-4.75bpw` | **Per-expert mixed K3–K8 is supported by the pinned loader.** Resident Engram is a known GB10 UMA capacity failure. Full disk-backed Engram load/serve qualification is still required before calling TP4 deployable. |
 | **TP2 / 2× Spark** | `vcruz305/DSV4.1-Flash-SAGE-EXL3-3.30bpw` | Mixed-K format is supported; **two-Spark capacity qualification is now the active test target**. EP2 is the baseline; pure MoE TP2 is an explicit A/B. |
-| **TP1 / 1× Spark** | `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` | **Serving measured on one Spark** via *native ExLlamaV3* (not vLLM). 15.1–15.2 tok/s no-draft, 17.5 median / 20.1–24.7 repeat with the DSpark drafter, measured with the **`exllamav3/` attention/MTP overlay** published in that repo. Separate stack: see [`one-spark-tp1/`](one-spark-tp1/). |
+| **TP1 / 1× Spark** | `vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` | **Serving measured on one Spark** via *native ExLlamaV3* (not vLLM). See [Measured performance](#measured-performance) and [`one-spark-tp1/`](one-spark-tp1/). |
 
 The recipe deliberately separates **loader-format compatibility** from **hardware deployment qualification**.
 
 **TP1 is a different engine.** TP2 and TP4 run the pinned vLLM image with `vllm-exl3`. TP1 runs native ExLlamaV3 from a fork branch, does not use `runtime.lock.json`'s vLLM pin, and does not advance it.
 
-If you have **one Spark**, go to [One Spark (TP1)](#one-spark-tp1); nothing else on this page applies to you. If you have **two or four Sparks**, start at the [Validation-first workflow](#validation-first-workflow).
+## TP2 and TP4 qualification
 
-## One Spark (TP1)
-
-**[`one-spark-tp1/`](one-spark-tp1/)** is a self-contained recipe and the only path on this page with measured serving numbers. It runs **native ExLlamaV3**, not vLLM and not `vllm-exl3`, so it does not use `runtime.lock.json` and does not advance it.
-
-It covers the build, the EXL3 attention/MTP overlay every measured number depends on, the `EXL3_ATS_COPY` placement split that puts the main model in CUDA and keeps the drafter aliased, measured decode/prefill numbers, and TabbyAPI configuration guidance.
-
-- [`one-spark-tp1/README.md`](one-spark-tp1/README.md): build, placement, configuration
-- [`one-spark-tp1/BENCHMARKS.md`](one-spark-tp1/BENCHMARKS.md): every measured figure with its full runtime identity, plus the measured negative results
-
-## Validation-first workflow
-
-These steps target TP2 and TP4. For a single Spark see [One Spark (TP1)](#one-spark-tp1) instead.
+The validation-first workflow. For a single Spark use [Quick start](#quick-start-one-spark) instead.
 
 ### 1. Host and remote-pack checks
 
@@ -232,7 +314,7 @@ DeepSeek-V4.1 has 384 routed experts, hidden size 5120, expert intermediate size
 |---|---:|---:|---|
 | TP4 + EP4 | 96 | 5120 × 2304 | TP4 correctness baseline |
 | TP2 + EP2 | 192 | 5120 × 2304 | TP2 correctness baseline |
-| **TP1 / EP1 (1× Spark, one device)** | **384** | **5120 × 2304** | **measured serving**; no sharding, every expert local. Runs *native ExLlamaV3*, not vLLM — see [`one-spark-tp1/`](one-spark-tp1/) |
+| **TP1 / EP1 (1× Spark, one device)** | **384** | **5120 × 2304** | **measured serving**; no sharding, every expert local. Runs *native ExLlamaV3*, not vLLM, see [`one-spark-tp1/`](one-spark-tp1/) |
 | pure MoE TP2 / EP1 | 384 | 5120 × 1152 | experimental A/B; 1152 is exactly 128-aligned |
 | pure MoE TP4 / EP1 | 384 | 5120 × 576 | guarded; 576 is not 128-aligned and 576→640 padding is not implemented here |
 
@@ -281,6 +363,16 @@ Every file in `docs/`:
 | [`SAGE330_OFFLOAD_FINDINGS.md`](docs/SAGE330_OFFLOAD_FINDINGS.md) | Historical two-Spark results, reusable mechanisms and current integration gaps |
 | [`SGLANG_V41_OPTIMIZATION_NOTES.md`](docs/SGLANG_V41_OPTIMIZATION_NOTES.md) | Independently implemented lessons from the SGLang reference article |
 | [`HF_MODEL_CARD_CORRECTION.md`](docs/HF_MODEL_CARD_CORRECTION.md) | Replacement runtime/compatibility text for the public 4.75bpw model card |
+
+Each overlay in `overlays/` documents itself:
+
+| Overlay | Covers |
+|---|---|
+| [`disk-engram/`](overlays/disk-engram/README.md) | The disk-backed Engram overlay |
+| [`dspark-in-checkpoint/`](overlays/dspark-in-checkpoint/README.md) | In-checkpoint DSpark draft wiring |
+| [`dspark-draft-setup/`](overlays/dspark-draft-setup/README.md) | Config additions the 4.75bpw pack does not ship, needed for spec-decode, plus the current draft-class blocker |
+| [`gb10-h2d-prefetch/`](overlays/gb10-h2d-prefetch/README.md) | GB10 host-to-device prefetch |
+| [`sm120-sparse-fix/`](overlays/sm120-sparse-fix/README.md) | The `sm_120` sparse fix |
 
 The single-Spark recipe keeps its own documentation under [`one-spark-tp1/`](one-spark-tp1/).
 
