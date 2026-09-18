@@ -4,7 +4,20 @@ Serving and qualification tooling for **DeepSeek-V4.1-Flash EXL3** on NVIDIA DGX
 
 > vLLM owns the DeepSeek-V4.1 model graph. `vllm-exl3` owns EXL3 routed-expert storage/execution. ExLlamaV3 supplies EXL3 kernels; it is not the V4.1 graph owner.
 
-## Current status
+## Contents
+
+- [Which path do I need](#which-path-do-i-need): start here
+- [One Spark (TP1)](#one-spark-tp1): the only measured serving path today
+- [Validation-first workflow](#validation-first-workflow): TP2 and TP4, steps 1 to 7
+- [TP4 release boundary](#tp4-release-boundary)
+- [TP2 active qualification](#tp2-active-qualification)
+- [Architecture target](#architecture-target): expert geometry per layout
+- [Locked runtime](#locked-runtime): the pin and what it contains
+- [Documentation map](#documentation-map): every file in `docs/`
+- [Repository layout](#repository-layout)
+- [License](#license)
+
+## Which path do I need
 
 | Topology | Artifact | Status |
 |---|---|---|
@@ -16,46 +29,20 @@ The recipe deliberately separates **loader-format compatibility** from **hardwar
 
 **TP1 is a different engine.** TP2 and TP4 run the pinned vLLM image with `vllm-exl3`. TP1 runs native ExLlamaV3 from a fork branch, does not use `runtime.lock.json`'s vLLM pin, and does not advance it.
 
-## Locked runtime
+If you have **one Spark**, go to [One Spark (TP1)](#one-spark-tp1); nothing else on this page applies to you. If you have **two or four Sparks**, start at the [Validation-first workflow](#validation-first-workflow).
 
-`runtime.lock.json` is the single source of truth for the vLLM image, plugin revision, ExLlamaV3 revision, CUDA target, model revisions and first-boot policy.
+## One Spark (TP1)
 
-Current `vllm-exl3` pin:
+**[`one-spark-tp1/`](one-spark-tp1/)** is a self-contained recipe and the only path on this page with measured serving numbers. It runs **native ExLlamaV3**, not vLLM and not `vllm-exl3`, so it does not use `runtime.lock.json` and does not advance it.
 
-```text
-814d4fe38082cddd838b45418c7d13a95395a36a
-```
+It covers the build, the EXL3 attention/MTP overlay every measured number depends on, the `EXL3_ATS_COPY` placement split that puts the main model in CUDA and keeps the drafter aliased, measured decode/prefill numbers, and TabbyAPI configuration guidance.
 
-That pin includes:
-
-- GB10 build compatibility from PR #9 by @fattchris;
-- per-MoE TP/EP geometry resolution;
-- **per-expert/per-projection mixed-K support from PR #10 by @Blackwellboy**;
-- exact K3–K8 trellis shapes for `w1`, `w2` and `w3`;
-- physical-trellis K selection for uniform fused layers, even when config/base K differs;
-- fused execution for uniform-K layers;
-- correctness-first `LinearEXL3` loop for heterogeneous layers;
-- a safety guard that disables low-memory prescan when expert placement is not linear;
-- TP-aware mixed-K header prescan so pure MoE TP2 allocates the correct 1152-wide local trellis geometry;
-- V4.1-specific cache/topology planning that keeps logical 890 B/token separate from measured backend allocation.
-
-Heterogeneous mixed-K execution is **not CUDA-graph-qualified yet**. First boot stays eager.
-
-## Architecture target
-
-DeepSeek-V4.1 has 384 routed experts, hidden size 5120, expert intermediate size 2304 and top-k 6.
-
-| Layout | Local experts | Expert matrix | Status |
-|---|---:|---:|---|
-| TP4 + EP4 | 96 | 5120 × 2304 | TP4 correctness baseline |
-| TP2 + EP2 | 192 | 5120 × 2304 | TP2 correctness baseline |
-| **TP1 / EP1 (1× Spark, one device)** | **384** | **5120 × 2304** | **measured serving**; no sharding, every expert local. Runs *native ExLlamaV3*, not vLLM — see [`one-spark-tp1/`](one-spark-tp1/) |
-| pure MoE TP2 / EP1 | 384 | 5120 × 1152 | experimental A/B; 1152 is exactly 128-aligned |
-| pure MoE TP4 / EP1 | 384 | 5120 × 576 | guarded; 576 is not 128-aligned and 576→640 padding is not implemented here |
-
-There is **no 128-total-expert ExLlamaV3 ceiling**. The historical `>128` fallback concerns rows assigned to one expert in a batch, not experts owned by a rank.
+- [`one-spark-tp1/README.md`](one-spark-tp1/README.md): build, placement, configuration
+- [`one-spark-tp1/BENCHMARKS.md`](one-spark-tp1/BENCHMARKS.md): every measured figure with its full runtime identity, plus the measured negative results
 
 ## Validation-first workflow
+
+These steps target TP2 and TP4. For a single Spark see [One Spark (TP1)](#one-spark-tp1) instead.
 
 ### 1. Host and remote-pack checks
 
@@ -237,11 +224,83 @@ V4.1 context estimates must use measured backend allocation for capacity claims.
 
 128K remains unverified.
 
-## Important files
+## Architecture target
 
-- `runtime.lock.json` — immutable runtime/model contract
-- `Dockerfile.spark` — baseline locked runtime
-- `Dockerfile.disk-engram` — explicit disk-Engram derivative
+DeepSeek-V4.1 has 384 routed experts, hidden size 5120, expert intermediate size 2304 and top-k 6.
+
+| Layout | Local experts | Expert matrix | Status |
+|---|---:|---:|---|
+| TP4 + EP4 | 96 | 5120 × 2304 | TP4 correctness baseline |
+| TP2 + EP2 | 192 | 5120 × 2304 | TP2 correctness baseline |
+| **TP1 / EP1 (1× Spark, one device)** | **384** | **5120 × 2304** | **measured serving**; no sharding, every expert local. Runs *native ExLlamaV3*, not vLLM — see [`one-spark-tp1/`](one-spark-tp1/) |
+| pure MoE TP2 / EP1 | 384 | 5120 × 1152 | experimental A/B; 1152 is exactly 128-aligned |
+| pure MoE TP4 / EP1 | 384 | 5120 × 576 | guarded; 576 is not 128-aligned and 576→640 padding is not implemented here |
+
+There is **no 128-total-expert ExLlamaV3 ceiling**. The historical `>128` fallback concerns rows assigned to one expert in a batch, not experts owned by a rank.
+
+## Locked runtime
+
+`runtime.lock.json` is the single source of truth for the vLLM image, plugin revision, ExLlamaV3 revision, CUDA target, model revisions and first-boot policy.
+
+Current `vllm-exl3` pin:
+
+```text
+814d4fe38082cddd838b45418c7d13a95395a36a
+```
+
+That pin includes:
+
+- GB10 build compatibility from PR #9 by @fattchris;
+- per-MoE TP/EP geometry resolution;
+- **per-expert/per-projection mixed-K support from PR #10 by @Blackwellboy**;
+- exact K3–K8 trellis shapes for `w1`, `w2` and `w3`;
+- physical-trellis K selection for uniform fused layers, even when config/base K differs;
+- fused execution for uniform-K layers;
+- correctness-first `LinearEXL3` loop for heterogeneous layers;
+- a safety guard that disables low-memory prescan when expert placement is not linear;
+- TP-aware mixed-K header prescan so pure MoE TP2 allocates the correct 1152-wide local trellis geometry;
+- V4.1-specific cache/topology planning that keeps logical 890 B/token separate from measured backend allocation.
+
+Heterogeneous mixed-K execution is **not CUDA-graph-qualified yet**. First boot stays eager.
+
+## Documentation map
+
+Every file in `docs/`:
+
+| Document | Covers |
+|---|---|
+| [`TP4.md`](docs/TP4.md) | TP4 + EP4 across four Sparks: the preferred qualification topology |
+| [`TP2.md`](docs/TP2.md) | TP2 on two Sparks: the aggressive target, and the EP2-vs-TP2 A/B |
+| [`TP2_METADATA_ATTESTATION.md`](docs/TP2_METADATA_ATTESTATION.md) | Why the canonical TP2 snapshot predates the explicit mixed-format metadata contract |
+| [`DISK_ENGRAM.md`](docs/DISK_ENGRAM.md) | Disk-backed Engram: the current TP4 capacity path, isolated from the baseline image |
+| [`VALIDATION.md`](docs/VALIDATION.md) | The fail-closed validation gates and what each one actually proves |
+| [`COMPATIBILITY.md`](docs/COMPATIBILITY.md) | The DeepSeek-V4.1 EXL3 compatibility matrix |
+| [`TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Failure modes and their diagnostics |
+| [`SM120_UVA.md`](docs/SM120_UVA.md) | Experimental one-GPU `sm_120` path with large host RAM. **Not** the DGX Spark recipe |
+| [`TONOKEN3_VALIDATION.md`](docs/TONOKEN3_VALIDATION.md) | Lna-Lab / TonoKen3 interoperability validation protocol |
+| [`SAGE330_OFFLOAD_FINDINGS.md`](docs/SAGE330_OFFLOAD_FINDINGS.md) | Historical two-Spark results, reusable mechanisms and current integration gaps |
+| [`SGLANG_V41_OPTIMIZATION_NOTES.md`](docs/SGLANG_V41_OPTIMIZATION_NOTES.md) | Independently implemented lessons from the SGLang reference article |
+| [`HF_MODEL_CARD_CORRECTION.md`](docs/HF_MODEL_CARD_CORRECTION.md) | Replacement runtime/compatibility text for the public 4.75bpw model card |
+
+The single-Spark recipe keeps its own documentation under [`one-spark-tp1/`](one-spark-tp1/).
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| [`one-spark-tp1/`](one-spark-tp1/) | **Single-Spark TP1 on native ExLlamaV3.** Self-contained; does not use the vLLM pin |
+| `runtime.lock.json` | Immutable runtime/model contract |
+| `Dockerfile.spark` | Baseline locked runtime |
+| `Dockerfile.disk-engram` | Explicit disk-Engram derivative |
+| `scripts/` | Validation, launch, preflight and receipt tooling (see below) |
+| `profiles/` | Per-topology environment profiles, including `tp2-disk-engram.env` |
+| `overlays/`, `configs/` | Runtime overlays and configuration |
+| `attestations/`, `tests/` | Recorded attestations and the repository's own tests |
+| `AGENTS.md` | Non-negotiable rules for changes to this repository |
+| `THIRD_PARTY_NOTICES.md` | Attribution and upstream licenses |
+
+Key scripts:
+
 - `scripts/validate_pack.py` — physical checkpoint validator
 - `scripts/check_disk_engram_cluster.py` — all-node disk-Engram preflight
 - `scripts/check_oom_guards.sh` — exact-host watchdog verification
@@ -250,13 +309,6 @@ V4.1 context estimates must use measured backend allocation for capacity claims.
 - `scripts/v41_context_receipt.py` — V4.1 cache/capacity receipt helper
 - `scripts/kernel_dispatch_receipt.sh` — actual runtime/kernel evidence collector
 - `scripts/oom_guard.sh` — exact-container UMA safety guard
-- `one-spark-tp1/` — **single-Spark TP1 on native ExLlamaV3**: build, the EXL3 attention/MTP overlay every measured number depends on, the `EXL3_ATS_COPY` placement split that puts the main model in CUDA and keeps the drafter aliased, measured decode/prefill numbers, and TabbyAPI configuration guidance
-- `docs/TP4.md` — TP4 qualification details
-- `docs/DISK_ENGRAM.md` — disk-backed Engram design/qualification
-- `docs/TP2.md` — TP2 qualification and EP2-vs-TP2 A/B
-- [SAGE 3.30 offload findings](docs/SAGE330_OFFLOAD_FINDINGS.md) — historical two-Spark results, reusable mechanisms and current integration gaps
-- `docs/SGLANG_V41_OPTIMIZATION_NOTES.md` — independently implemented lessons from the SGLang reference article
-- `THIRD_PARTY_NOTICES.md` — attribution and upstream licenses
 
 ## License
 
