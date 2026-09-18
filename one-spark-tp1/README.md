@@ -117,6 +117,12 @@ export CHUNK=2048                     # prefill chunk
 export CTX=6144
 ```
 
+`EXL3_DSPARK_CONF=0.7` is the measured optimum: a sweep of 0.3 / 0.5 / 0.7 / 0.85 / 0.95
+put 0.7 fastest at every context tested, with 0.95 costing about 10%. See `BENCHMARKS.md`.
+
+`CTX` can be raised well beyond 6144 at almost no cost: 131,072 measures the same warm
+decode as 6,144, and 262,144 costs about 1 tok/s. `CTX` must be a multiple of 256.
+
 `EXL3_ATS_COPY` takes a regex matched against tensor names; matching tensors are copied into CUDA
 memory, the rest stay aliased. The negative lookahead above is the whole trick.
 

@@ -56,6 +56,58 @@ model plus ~14 GiB of drafter cannot both be resident in 128 GB, so the drafter 
 
 Chunk 4096 does not fit once the model is resident; use 2048 in that configuration.
 
+## Context is nearly free
+
+Single prompt of 1964 tokens repeated in one process, 256 new tokens per generation,
+`EXL3_ATS_COPY='^(?!mtp\.)'`, DSpark drafter at `EXL3_DSPARK_CONF=0.7`. This is a
+best-case prefix-cache hit and is **not** comparable to the 12-varied-prompt figures
+above; it isolates the cost of context, not of a realistic workload.
+
+| CTX | warm decode tok/s | `torch_alloc` |
+|---:|---:|---:|
+| 6,144 | 33.36 | 107.19 GiB |
+| 131,072 | 33.37 | 107.92 GiB |
+| 262,144 | 32.16 | 108.69 GiB |
+
+A 43x increase in context costs about 1 tok/s and 1.5 GiB. Only 4 of 46 cache layers
+scale with context, at **6272 bytes/token** total (main cache 0.029 GiB + 3200 B/tok
+across 4 `CacheLayer_dsa`; drafter 3072 B/tok across 3 `CacheLayer_dspark`). The other
+42 layers are fixed-shape recurrent state. `PAGE_SIZE` is 256, so `CTX` must be a
+multiple of 256. Every context up to the architecture ceiling of 1,048,576 loads in
+36-44 s.
+
+## Confidence gate sweep
+
+Same harness and prompt, CTX=131072, warm repeats:
+
+| `EXL3_DSPARK_CONF` | best warm tok/s | acceptance |
+|---:|---:|---:|
+| 0.3 | 32.94 | 0.920 |
+| 0.5 | 32.27 | 0.945 |
+| **0.7** | **33.37** | **0.981** |
+| 0.85 | 32.46 | 0.967 |
+| 0.95 | 29.83 | 0.970 |
+
+0.7 is optimal. Lowering the gate to make more rounds draft does **not** help, and 0.95
+costs 10%. A 10-repetition run at 0.7 held 32.7-33.33 tok/s with no decay.
+
+`EXL3_MOE_MIXED_BSZ1=1` produced no measurable gain (33.27 vs 33.33) and remains off by
+default; it also makes greedy output non-reproducible run to run.
+
+## Concurrency
+
+Two concurrent streams **without** the drafter reach 19.12 tok/s aggregate, which is
+below what one stream achieves with the drafter. Two streams **with** the drafter fail:
+
+```
+RuntimeError: The expanded size of the tensor (2036) must match the existing size (2034)
+at non-singleton dimension 1.  Target sizes: [6, 2036].  Tensor sizes: [6, 2034]
+```
+
+`[6, N]` is the speculative verify batch (draft size 5 + 1). Concurrency alone works;
+speculation combined with concurrency does not. Single stream with the drafter is the
+supported configuration.
+
 ## Measured negative results
 
 Recorded so they are not re-tried. Same runtime identity as above.
