@@ -356,12 +356,55 @@ One consequence deserves stating plainly, because it inverts the obvious reading
 lower-precision kernel is therefore the one serving *plain decode*, while the speculative
 verify window runs the higher-precision path. On that reading the divergent positions are
 places where int8 activation quantization changes the argmax, and the no-drafter output is not
-automatically the more faithful of the two. **Which path is closer to unquantized fp16 is not
-established here**, and it is the open question worth answering next.
+automatically the more faithful of the two.
 
-It also reaches past speculation entirely. Prefill always runs many rows, so prefill-computed
-logits take the GEMM path while decode takes the GEMV path. Any comparison that crosses that
-boundary is comparing kernels, not configurations.
+### Measured: the GEMM path is the more accurate one
+
+An operator-level comparison settles it. Real activations were captured from six live
+`LinearEXL3` modules during a forward, then the same input row was pushed through each kernel
+and compared against `reconstruct_hgemm`, which dequantizes the trellis to a dense weight and
+does an ordinary hgemm with **no activation quantization**. Same weights, same row, same
+process, one reference, so kernel noise is the only variable.
+
+| module in_features | GEMV SQNR | GEMM SQNR | gap | GEMV mean rel err | GEMM mean rel err |
+|---:|---:|---:|---:|---:|---:|
+| 5120 | 46.99 dB | 67.08 dB | 20.1 | 3.3% | 0.23% |
+| 1280 | 46.72 dB | 69.66 dB | 22.9 | 2.8% | 0.12% |
+| 5120 | 51.86 dB | 65.99 dB | 14.1 | 1.1% | 0.21% |
+| 4096 | 39.61 dB | 65.48 dB | 25.9 | 4.8% | 0.17% |
+| 4096 | 37.66 dB | 64.99 dB | 27.3 | 17.0% | 1.2% |
+| 4096 | 38.91 dB | 65.12 dB | 26.2 | 3.8% | 0.15% |
+
+**The GEMM path is closer to the reference in 6 of 6 modules, by 14 to 27 dB.** Cosine error
+tells the same story: GEMM lands between 0 and 1.8e-7, GEMV between 3.2e-6 and 8.5e-5. For
+scale, `tests/deepseek_v41/moe_grouped_equiv.py` records ordinary fp16 kernel differences at
+around 1e-3 relative. GEMM sits inside that band; GEMV sits 10x to 170x above it.
+
+So the int8 GEMV path is not merely a different approximation, it is a **measurably worse**
+one, and it is the path serving plain single-token decode. Two caveats on the method: the
+reference is itself an fp16 hgemm rather than an fp32 oracle, so these are relative rankings
+rather than absolute error; and `max_rel` is not quoted because near-zero reference elements
+make it meaningless (values above 90 appear), which is why SQNR and mean relative error are
+the metrics used.
+
+**Consequence.** `EXL3_INT8_GEMV=0` buys roughly 22 dB of SQNR on the decode path for a
+measured 6.8% throughput cost. That is a real fidelity choice rather than a wash, and it is
+the setting to use when output quality matters more than the last few percent of speed.
+
+### Three regimes, not two
+
+`AUTO_RECONSTRUCT_THRESHOLD` is 144, so the dispatch has a second boundary above the one that
+causes the divergence:
+
+| rows | path | relative accuracy |
+|---|---|---|
+| 1 to 2 | int8 GEMV | lowest |
+| 3 to 144 | `exl3_gemm` / `exl3_mgemm` | middle |
+| over 144 | `reconstruct_hgemm` (dense dequantized weight) | highest |
+
+That reaches past speculation entirely. **Prefill runs chunks far above 144 rows, so prefill
+takes the most accurate path while single-token decode takes the least accurate one.** Any
+comparison crossing either boundary is comparing kernels, not configurations.
 
 What it means in practice:
 

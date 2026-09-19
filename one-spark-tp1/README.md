@@ -247,9 +247,12 @@ One caveat outranks all of these:
   token. The cause is now isolated: the EXL3 int8 GEMV path is gated to `size_m <= 2`, so plain
   decode (1 row) and a verify window of 3 or more rows run **different kernels**. Divergence of
   that class appears only when the two sides differ, and `EXL3_INT8_GEMV=0` changes even the
-  no-drafter baseline, which proves the kernels disagree. Note the direction: the int8 GEMV path
-  quantizes activations and the GEMM path does not, so plain decode is the lower-precision side.
-  Throughput figures are unaffected. See `BENCHMARKS.md` and `scripts/spec_exactness.py`.
+  no-drafter baseline, which proves the kernels disagree. Measured against a dequantized-weight
+  reference, the GEMM path is closer in 6 of 6 modules by 14 to 27 dB SQNR, so the int8 GEMV
+  path serving plain decode is the **least accurate** of the three dispatch regimes (above 144
+  rows a third path, `reconstruct_hgemm`, is more accurate still, which is what prefill uses).
+  Throughput figures are unaffected. `EXL3_INT8_GEMV=0` buys about 22 dB on the decode path for
+  a measured 6.8% throughput cost. See `BENCHMARKS.md` and `scripts/spec_exactness.py`.
 
 And one tuning knob turned out not to be a knob:
 
