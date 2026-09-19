@@ -387,9 +387,56 @@ rather than absolute error; and `max_rel` is not quoted because near-zero refere
 make it meaningless (values above 90 appear), which is why SQNR and mean relative error are
 the metrics used.
 
-**Consequence.** `EXL3_INT8_GEMV=0` buys roughly 22 dB of SQNR on the decode path for a
-measured 6.8% throughput cost. That is a real fidelity choice rather than a wash, and it is
-the setting to use when output quality matters more than the last few percent of speed.
+### The residual mode is the setting you want
+
+`EXL3_INT8_GEMV` takes three values, and the default is 2 (`exl3_gemv_int8.cu:27`). Mode 1 is
+the residual int8 path, which narrows its own gate to `size_m <= 1` rather than 2. Running the
+same comparison under each mode, against the same reference:
+
+| mode | decode tok/s | cost | SQNR range | mean rel err |
+|---|---:|---:|---:|---:|
+| 2, default | 32.50 | baseline | 37.7 to 51.9 dB | 1.1% to 17% |
+| **1, residual** | **31.90** | **−1.8%** | **65.8 to 69.3 dB** | **0.10% to 0.33%** |
+| 0, off (falls through to GEMM) | 30.37 | −6.8% | 65.0 to 69.7 dB | 0.12% to 1.2% |
+
+Mode 1 gains **17 to 28 dB** over the default and reaches parity with the GEMM path, beating it
+in 5 of 6 modules and carrying a lower mean relative error, at a quarter of the throughput cost
+of turning the path off entirely. On per-token numerical accuracy, mode 1 is the best value of
+the three.
+
+### But no mode makes drafted and non-drafted output agree
+
+Per-layer accuracy and end-to-end agreement turn out to be different properties, and it is
+worth recording that the obvious inference from the table above is wrong. Re-running the
+12-prompt exactness comparison under each mode:
+
+| mode | exact | near-tie | clear preference |
+|---|---:|---:|---:|
+| 2, default | 4 | 4 | **4** |
+| 1, residual | 6 | 1 | **5** |
+| 0, off | 5 | 4 | **3** |
+
+Mode 1 has the best per-layer SQNR yet the *most* clear-preference divergences, and mode 0 does
+not clear them either. Two causes, both mechanical:
+
+1. **Mode 1 widens the split rather than closing it.** Its gate is `size_m <= 1`, so decode
+   (m=1) runs residual GEMV while every verify window (m>=2) runs GEMM. The default at least
+   shares the kernel at m=2.
+2. **Mode 0 does not unify the paths.** `exl3_gemm.cu:220` dispatches a second, QTIP-style GEMV
+   for small m through `exl3_gemv_try_launch`, with its own env mode at `exl3_gemv.cu:29`.
+   `EXL3_INT8_GEMV` governs only the *int8* GEMV, so at m=1 decode still lands on a GEMV
+   kernel, just a different one.
+
+Underneath both is the reason small numerical differences do not stay small here: this
+architecture makes several **discrete** decisions per token, MoE expert top-k, DSA block top-k,
+and the final argmax. Any difference between two kernels can flip one of those and send the two
+runs down different trajectories. Two individually accurate kernels still disagree.
+
+**Practical reading.** Set `EXL3_INT8_GEMV=1` if you want the most accurate decode arithmetic
+for 1.8%, which is a real and cheap gain. Do **not** expect any value of this variable to make
+a drafted run reproduce a non-drafted one; that is not what it controls. Making the paths truly
+identical would need the QTIP GEMV disabled as well, which is untested here and is the open
+thread on this topic.
 
 ### Three regimes, not two
 
@@ -493,11 +540,92 @@ serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gem
   and `fwd_barrier` are native NCCL. `gather_small` runs **per token** for the argmax, so it sits
   on the critical path.
 
-  **The real blocker is the attention path, not the network.** `layer_types` is derived from
-  `compress_ratios`, which on this pack is `{0: 2, 2: 18, 1: 20}`, giving **2 layers of
-  `DSV4Attention` and 38 of `DSV41Attention`**. `dsv4.py` has `all_reduce` calls;
-  `modules/dsv41.py` contains **zero** occurrences of `backend`, `all_reduce`, `tp_` or
-  `num_devices`. So 95% of the layers have no tensor-parallel path at all.
+  **The attention path needs work, but far less than a file-level grep suggests, and an earlier
+  revision of this file got that wrong.** `layer_types` is derived from `compress_ratios`, which
+  on this pack is `{0: 2, 2: 18, 1: 20}`, giving **2 layers of `DSV4Attention` and 38 of
+  `DSV41Attention`**. `modules/dsv41.py` contains zero occurrences of `backend`, `all_reduce` or
+  `tp_`, which reads as "38 of 40 layers have no tensor-parallel path". That conclusion was
+  wrong, because it grepped the file rather than the class hierarchy.
+
+  `DSV41Attention` **subclasses `DSV4Attention`** (`dsv41.py:145`) and defines no `forward` of
+  its own, so it inherits the parent's, which already carries the collective:
+
+  ```python
+  if self.num_q_heads == 0:
+      # Zero-width TP shard: contribute nothing, keep the collective aligned
+      y = torch.zeros_like(x, dtype = out_dtype or self.out_dtype)
+      if self.tp_reduce:
+          params["backend"].all_reduce(y, False)
+      return y
+  ...
+  if self.tp_reduce:
+      params["backend"].all_reduce(y)
+  ```
+
+  It also overrides none of `tp_export`, `tp_import` or `make_tp_allocation`, so it uses the
+  parent's. Those split only `q_b`, `wo_a`, `wo_b` and the sinks over
+  `channels_to_split = o_groups`, and **replication of everything else is the deliberate
+  design**, stated in the source:
+
+  > Everything KV-side is shared-MQA and replicated per rank (q_a, wkv, norms, compressor,
+  > indexer, pools, rings); only q_b / wo_a / wo_b / sinks split
+
+  The parent's allocation already counts `idx_wq_b`, `idx_weights`, `compressor` and `indexer`
+  by name, and its `tp_export` exports all four. That has a useful consequence: because the
+  indexer is replicated, the DSA top-k runs on complete scores on every rank, so no score
+  all-reduce is required and the distributed-top-k problem never arises. Cross-layer KV and
+  index sharing is consistent for the same reason.
+
+  The genuine gaps are therefore narrow and specific:
+
+  1. `tp_export` hardcodes `"cls": DSV4Attention`, so an import would rebuild the wrong class.
+  2. Its `kwargs` omit the DSV4.1-only constructor arguments (`is_kv_source`, `is_index_source`,
+     `kv_source_layer`, `index_source_layer`, candidate role).
+  3. `idx_wk` and `idx_k_norm` (`dsv41.py:195,197`) are absent from the export list.
+  4. `DSV41Compressor` (`dsv41.py:71`) is a standalone class, not a subclass of the DSV4
+     compressor, and its methods are `__init__`, `modules`, `project`, `pool` only, so it has no
+     `tp_export` / `tp_import` of its own.
+
+  That is a `tp_export` / `tp_import` override on `DSV41Attention` plus an export pair on
+  `DSV41Compressor`, not a tensor-parallel implementation from scratch. Concretely, reading the
+  constructors and the parent's import:
+
+  - `DSV41Attention.__init__` is
+    `(config, key, layer_idx, compress_rate, is_kv_source, is_index_source, kv_source_layer,
+    index_source_layer, candidate_role, candidate_topk_blocks, candidate_block_size, ref_quant,
+    select_hq_bits, qmap, **kwargs)` and calls `super()` with `layer_type="v41"`. A
+    `tp_export` override has to carry those DSV4.1-only arguments, which the parent's `kwargs`
+    block does not.
+  - It already early-returns on `num_q_heads == 0`, so the zero-width shard case the parent's
+    collective expects is **already handled**.
+  - Its submodules are conditional: `compressor` on `is_kv_source`, `idx_wq_b` / `idx_weights`
+    on `is_index_source`, `idx_wk` / `idx_k_norm` on `owns_index_keys`. An import has to
+    reproduce those conditions rather than assume all are present.
+  - The parent's `tp_import` injects pre-built submodules as constructor kwargs and passes
+    `tp_defer_compressors=True` to stop `__init__` rebuilding them. `DSV41Attention.__init__`
+    does not honour that flag, so it would overwrite injected modules; it needs the same guard.
+  - `DSV41Compressor.__init__` does **not** accept injected `wkv` / `wgate` / `norm` the way
+    `DSV4Compressor` does, and `wgate` is `None` when `compress_rate == 1`. Both need handling.
+  - The parent's `tp_import` hardcodes `DSV4Compressor.tp_import` for both `compressor` and
+    `indexer`, so a DSV4.1 import must dispatch to `DSV41Compressor` instead.
+
+  Validation does not need a second machine. A single-device backend running N logical ranks
+  sequentially with real reductions, compared against the unsharded module on the same
+  captured activations, would exercise all of the above. `tests/test_cpu_cache_tp.py` already
+  establishes the pattern of standing in for rank workers with plain dicts, and
+  `scripts/kernel_accuracy.py` in this folder shows the capture-and-compare method, with the
+  ~1e-3 fp16 noise floor as the pass threshold.
+
+  **A note on how this assessment moved.** It has been revised three times as the reading got
+  deeper, each time downward: first "no TP path at all" (from grepping the file, missing that
+  the class inherits `forward` from `DSV4Attention`), then "the DSV4.1 submodules are outside
+  the allocation" (missing that the parent already names them), and now the four items above.
+  Treat the first two framings as superseded.
+
+  **So the status is "untested", not "absent".** What remains unverified is whether the
+  inherited allocation composes with DSV4.1's recurrent state and its cross-layer KV and index
+  sharing (`kv_source_layer_ids`, `index_source_layer_ids`). That is exactly what a
+  single-device multi-rank simulation would settle, with no second machine required.
 
   **And it fails silently rather than refusing.** `supports_tp` defaults to `True`
   (`model.py:26`), this architecture never overrides it, and `model.py:443` raises

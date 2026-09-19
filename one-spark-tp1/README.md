@@ -251,8 +251,13 @@ One caveat outranks all of these:
   reference, the GEMM path is closer in 6 of 6 modules by 14 to 27 dB SQNR, so the int8 GEMV
   path serving plain decode is the **least accurate** of the three dispatch regimes (above 144
   rows a third path, `reconstruct_hgemm`, is more accurate still, which is what prefill uses).
-  Throughput figures are unaffected. `EXL3_INT8_GEMV=0` buys about 22 dB on the decode path for
-  a measured 6.8% throughput cost. See `BENCHMARKS.md` and `scripts/spec_exactness.py`.
+  Throughput figures are unaffected. `EXL3_INT8_GEMV=1` (residual) is worth setting for decode
+  arithmetic on its own merits: it gains 17 to 28 dB over the default and reaches GEMM parity
+  for 1.8% throughput. **It does not, however, make drafted and non-drafted output agree**, and
+  neither does `=0`; measured over 12 prompts the clear-preference divergences are 4, 5 and 3
+  for modes 2, 1 and 0. A second QTIP-style GEMV at `exl3_gemm.cu:220` also serves small m and
+  is not governed by this variable, so decode and verify never run identical kernels. See
+  `BENCHMARKS.md`, `scripts/kernel_accuracy.py` and `scripts/spec_exactness.py`.
 
 And one tuning knob turned out not to be a knob:
 
