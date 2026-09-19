@@ -284,6 +284,13 @@ produce them across nodes. Cross-node work on the fork branch got as far as a TC
 (`exllamav3/model/net_transport.py`, 13 passing unit tests) for a future pipeline split; it is
 **not** wired into the forward path and is not a TP implementation.
 
+Native TP **within** one Spark is a different question, and it is now measured: it loads and
+generates correctly at `world_size=1` on the NCCL backend, at 11.98 tok/s against 12.54 without
+TP. That validates export, import, spawn, dispatch and the collective path; it does not validate
+the splitting arithmetic, since at one rank nothing is actually split. See
+[`BENCHMARKS.md`](BENCHMARKS.md) under "Measured: native TP now runs on one Spark". It changes
+nothing about the paragraph above: the engine still cannot span two Sparks.
+
 ## Serving with TabbyAPI
 
 See [`tabbyapi/README.md`](tabbyapi/README.md) and [`tabbyapi/config.yml`](tabbyapi/config.yml).

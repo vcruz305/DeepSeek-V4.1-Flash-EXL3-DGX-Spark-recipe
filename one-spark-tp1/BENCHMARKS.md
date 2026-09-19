@@ -524,8 +524,10 @@ serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gem
 ## Not measured here
 
 - **Native ExLlamaV3 TP2 / TP4.** No cross-node native numbers exist to publish, so TP2 and TP4
-  in this repository are the vLLM path. The findings below come from reading the runtime, not
-  from measurement, and are recorded because they change what the work would actually involve.
+  in this repository remain the vLLM path. Native TP **at `world_size=1` on one Spark is now
+  measured and working**; see "Measured: native TP now runs" below. The transport and attention
+  analysis that follows was written from reading the runtime, and the measured section corrects
+  several of its conclusions. Read them in that order.
 
   **Multi-host transport is closer than it looks.** `TPBackendNCCL` already exists, is the
   default backend (`model.py:348`), and calls a real
@@ -616,7 +618,88 @@ serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gem
   `scripts/kernel_accuracy.py` in this folder shows the capture-and-compare method, with the
   ~1e-3 fp16 noise floor as the pass threshold.
 
-  ### Measured: where a TP load actually breaks first
+  ### Measured: native TP now runs on one Spark
+
+  Everything above this heading was written from reading the runtime. It is kept because the
+  transport analysis held up, but its conclusions about the attention path were incomplete and
+  its status verdict is superseded. What follows is measured.
+
+  **Native tensor parallelism loads and generates correctly on a single Spark at
+  `world_size=1`**, after fourteen fixes to the engine. Clean tree, 64 tokens, greedy, no
+  drafter, 12-token prompt:
+
+  | path | backend | decode | load |
+  |---|---|---|---|
+  | native TP, `world_size=1` | NCCL | **11.98 tok/s** | 87-90 s |
+  | no TP (same tree) | n/a | **12.54 tok/s** | 37 s |
+
+  TP costs about 4.5% here, which is the expected shape: real collective overhead with no
+  parallelism to offset it at one rank. **This is a plumbing validation, not a performance
+  result.** It exercises export, import, spawn, dispatch and the NCCL collective path. It does
+  **not** exercise the splitting arithmetic, because at one rank every split spans the full
+  range. Two Sparks would still be needed for that, and the single-host limit described in the
+  README is unchanged.
+
+  **Use the NCCL backend, not the default.** `tp_backend` defaults to `"native"`
+  (`model.py:268`), whose `all_reduce` routes through `ext.pg_all_reduce_cpu` and hits
+  `TORCH_CHECK(is_avx2_supported())` at `all_reduce_cpu.cu:544`. AVX2 is x86 and GB10 is
+  aarch64, so the native backend cannot reduce on a Spark at all. Pass `tp_backend="nccl"`:
+  `TPBackendNCCL.all_reduce` is `dist.all_reduce` on the GPU and touches no CPU SIMD path. NCCL
+  is also the only backend that could ever span two hosts, since `TPBackendNative` coordinates
+  through named shared memory.
+
+  **Correctness was established numerically, not from fluent-looking text.** A run that loads,
+  returns a full token count and a plausible tok/s can still be wrong: an earlier state of this
+  work produced `'1. The history of computing is a history of abstraction. 2. ...'` counting
+  upward, at 13.78 tok/s, with no error anywhere. Both paths are byte-deterministic on this
+  stack (four no-TP runs share one output hash, three TP runs share another), so output hashing
+  is a valid check here. TP is numerically equivalent to within fp16 reduction error, layer-0
+  attention output 0.559040 on both with std differing by ~4e-6, but it is **not bit-exact**,
+  and on this architecture the discrete per-token choices (MoE top-k, DSA block top-k, argmax)
+  turn that into a different but equally fluent greedy trajectory.
+
+  **The bug that mattered most was one missing dictionary key.** `tp_export` enumerated sixteen
+  of `DSV4Attention.__init__`'s parameters by hand and omitted `q_head_norm`, which defaults to
+  `True` while every DSV4.1 layer is constructed with `False`
+  (`architecture/deepseek_v41.py:170` and `:201`). Workers therefore rebuilt attention with the
+  default, `_rope_qkv` passed `q_ones` instead of `None`, and every query head received an
+  unweighted RMS norm the architecture does not use. Query reached the attention kernel at
+  std 0.999784 instead of 2.020987. Nothing raised. **A hand-enumerated parameter whitelist
+  fails silently and numerically rather than loudly; diff the constructor signature against the
+  exported kwargs.**
+
+  **Two silent fallbacks made this expensive to find**, and they are worth knowing about for any
+  work in this file. `dsv4.py` catches `AssertionError` around the fused-runner construction and
+  nulls both runners; `attention_fn/bc_dsa.py` catches bare `Exception` in `build_bc_dsa` and
+  declines. Neither logs anything. The second one fires under TP because `bc_dsa.py:89`
+  dereferences `rs.cache.max_num_tokens` while TP has replaced the cache with `id(cache)`
+  (`model_tp.py:570-571`), so TP silently runs the eager attention path where no-TP runs the
+  fused one. The eager path is correct; it was verified by forcing `EXL3_BC_DSA=0` with no TP.
+
+  **Class preservation across the TP boundary was a recurring defect, at four sites.**
+  `tp_export` hardcoded a concrete class where a DSV4.1 subclass was required, so workers
+  rebuilt the parent. Walking the class hierarchy rather than recalling which subclasses had
+  already caused trouble found all of them: `DSV4Attention` (`dsv4.py`), `DSV4LayerState`
+  (`cache/dsa.py`), `TransformerBlock` (`transformer.py`) and `HyperConnection`
+  (`hyperconnections.py`). The `TransformerBlock` one is the instructive case: it sat in an
+  earlier sweep of all 40 `"cls":` sites and was dismissed, because the sweep was filtered
+  through an assumption about which classes had subclasses instead of a check.
+
+  **A TP worker never calls `load()`.** It is built by `tp_import` and receives weights over
+  shared memory, so anything `load()` would have done has to be reproduced. That single cause
+  produced three separate failures here: the Engram table needing a per-rank
+  `Config.from_directory`, the recurrent layers needing to exist, and those layers needing
+  `alloc()` (their state starts on `meta`). Most modules get this for free because their
+  `tp_import` ends with `module.load_local(device)`; `EngramLayer` has no `load_local`.
+
+  The fix set is eight files, 20 hunks: `cache/dsa.py`, `modules/dsv4.py`, `dsv41.py`,
+  `dsv41_hc.py`, `engram.py`, `hyperconnections.py`, `module.py`, `transformer.py`.
+
+  ### Superseded: where a TP load used to break first
+
+  The account below was accurate when written and is kept for the method, not the verdict. Its
+  closing status of "untested" is now wrong, and its advice to set `supports_tp = False` should
+  **not** be followed: that would disable a path which works.
 
   Rather than continue reasoning from source, a tensor-parallel load was attempted on a single
   device with no code changes (`tensor_p=True`, `use_per_device=[80.0]`, one GPU, so nothing is
