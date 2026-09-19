@@ -616,6 +616,45 @@ serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gem
   `scripts/kernel_accuracy.py` in this folder shows the capture-and-compare method, with the
   ~1e-3 fp16 noise floor as the pass threshold.
 
+  ### Measured: where a TP load actually breaks first
+
+  Rather than continue reasoning from source, a tensor-parallel load was attempted on a single
+  device with no code changes (`tensor_p=True`, `use_per_device=[80.0]`, one GPU, so nothing is
+  actually split). It is **not** refused, because `supports_tp` is `true` for this
+  architecture, and it runs for 0.88 s, well past argument validation and into real work,
+  before failing:
+
+  ```
+  AttributeError: 'NoneType' object has no attribute 'storage_size'
+  ```
+
+  That is `make_tp_allocation`, at its one call against a possibly-absent submodule:
+
+  ```python
+  for comp in (self.compressor, self.indexer):
+      if comp is not None:
+          storage_dev += comp.wkv.storage_size() + comp.wgate.storage_size()
+  ```
+
+  `DSV41Compressor` sets `self.wgate = Linear(...) if self.gated else None` with
+  `gated = compress_rate > 1`. This pack's `compress_ratios` histogram is `{0: 2, 2: 18, 1: 20}`,
+  so **20 of 40 layers have ratio 1 and carry no `wgate` at all**. The parent's allocation
+  assumes one exists. The `comp is not None` guard covers a missing compressor but not a missing
+  gate.
+
+  So the first concrete fix is a None-guard on `comp.wgate` in `make_tp_allocation`, and this
+  confirms by traceback the `DSV41Compressor` gap that was previously only inferred from
+  reading. It does not tell us what breaks *next*; each fix reveals the following one.
+
+  Two practical notes for anyone repeating this, both learned the hard way:
+
+  - A script that triggers a TP load **must** use `if __name__ == "__main__":`. TP sets the
+    multiprocessing start method to `spawn`, which re-imports the main module in each child, so
+    an unguarded script silently executes itself twice.
+  - A failed TP init is **not** idempotent. It leaves `mp_children` populated, so a retry trips
+    `assert not self.mp_children` in `create_tp_context`, and leaks shared-memory objects.
+    Call `unload_tp()` before attempting again.
+
   **A note on how this assessment moved.** It has been revised three times as the reading got
   deeper, each time downward: first "no TP path at all" (from grepping the file, missing that
   the class inherits `forward` from `DSV4Attention`), then "the DSV4.1 submodules are outside
