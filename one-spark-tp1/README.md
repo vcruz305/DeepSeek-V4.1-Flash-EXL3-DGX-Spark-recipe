@@ -244,9 +244,12 @@ One caveat outranks all of these:
   an fp16 near-tie, and 4 differed where the target model clearly preferred another token, by as
   much as 0.812 against 0.113. Plain greedy is self-deterministic, so this is not run noise, and
   the acceptance logic is not the cause: the emitted token is always the target's own sampled
-  token. The batched verify window and single-token decode simply do not produce identical
-  logits. Throughput figures are unaffected. If you need output identical to the target model,
-  run without the drafter. See `BENCHMARKS.md` and `scripts/spec_exactness.py`.
+  token. The cause is now isolated: the EXL3 int8 GEMV path is gated to `size_m <= 2`, so plain
+  decode (1 row) and a verify window of 3 or more rows run **different kernels**. Divergence of
+  that class appears only when the two sides differ, and `EXL3_INT8_GEMV=0` changes even the
+  no-drafter baseline, which proves the kernels disagree. Note the direction: the int8 GEMV path
+  quantizes activations and the GEMM path does not, so plain decode is the lower-precision side.
+  Throughput figures are unaffected. See `BENCHMARKS.md` and `scripts/spec_exactness.py`.
 
 And one tuning knob turned out not to be a knob:
 

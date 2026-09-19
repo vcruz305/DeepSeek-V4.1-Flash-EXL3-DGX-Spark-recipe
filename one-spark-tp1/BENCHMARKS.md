@@ -319,12 +319,49 @@ else:
 ```
 
 The emitted token is always the target's sampled token, never the raw draft, so speculation
-cannot emit something the verify pass did not choose. The difference is upstream: **the
-target's logits in the batched verify window differ from its logits in single-token decode**.
-Those are not the same call. Verification runs the forward with `recurrent_history=True` plus
-the drafter's `draft_verifier_params`, over a multi-token window, on an architecture carrying
-recurrent state and a sparse-attention indexer. Which of those is responsible is **not**
-established here.
+cannot emit something the verify pass did not choose. The difference is upstream, and it has
+since been isolated.
+
+### The cause: decode and verify run different kernels
+
+The EXL3 int8 GEMV path is gated on row count. `exl3_gemv_int8.cu:127` returns false for
+`size_m > 2` (and line 254 tightens that to `size_m <= 1` in residual mode), and
+`exl3_gemm.cu:182` dispatches to it only when that gate passes. So the row count decides the
+kernel:
+
+| path | rows (`size_m`) | kernel |
+|---|--:|---|
+| plain decode | 1 | int8 GEMV |
+| verify, `num_draft_tokens = 1` | 2 | int8 GEMV |
+| verify, `num_draft_tokens >= 2` | 3+ | `exl3_gemm` / `exl3_mgemm` |
+
+Sweeping the verify width matches that boundary exactly. At 2 verify rows there are **no**
+clear-preference divergences, only benign near-ties. At 3 rows and above, three of four
+prompts flip to clear preference with **identical** first-difference indices and margins at
+widths 2, 3 and 5 (0.699 at index 2, 0.587 at index 96, 0.179 at index 5). The effect switches
+on at the gate and does not worsen with more rows, which is a discrete dispatch change rather
+than an accumulating error.
+
+Disabling the GEMV path confirms it from the other side. With `EXL3_INT8_GEMV=0` the
+**no-drafter baseline itself changes** on 3 of 4 prompts: plain greedy decode, no speculation
+involved, produces different output hashes. That is direct evidence the two kernels do not
+agree. And with both sides then on the same kernel, clear-preference divergence is absent at
+width 1, exactly as it is when both sides are on GEMV.
+
+So the rule is simple: **clear-preference divergence appears when the two sides use different
+kernels, and not otherwise.**
+
+One consequence deserves stating plainly, because it inverts the obvious reading.
+`exl3_gemv_int8` consumes **int8-quantized activations**; the GEMM path does not. The
+lower-precision kernel is therefore the one serving *plain decode*, while the speculative
+verify window runs the higher-precision path. On that reading the divergent positions are
+places where int8 activation quantization changes the argmax, and the no-drafter output is not
+automatically the more faithful of the two. **Which path is closer to unquantized fp16 is not
+established here**, and it is the open question worth answering next.
+
+It also reaches past speculation entirely. Prefill always runs many rows, so prefill-computed
+logits take the GEMM path while decode takes the GEMV path. Any comparison that crosses that
+boundary is comparing kernels, not configurations.
 
 What it means in practice:
 
@@ -333,8 +370,11 @@ What it means in practice:
 - Any A/B that perturbs the numeric path can end up comparing different generated texts. That
   is exactly what confounded the confidence-gate table above, and it is why output hashes
   belong in any future comparison on this stack.
-- If you need output identical to the target model, run without the drafter and accept
-  15.13 to 15.22 tok/s.
+- For output consistency, the lever is the kernel boundary rather than the drafter.
+  `EXL3_INT8_GEMV=0` puts decode and verify on the same path and removes the
+  clear-preference class, at a measured 6.8% throughput cost. Running without the drafter at
+  15.13 to 15.22 tok/s does **not** by itself give you the higher-precision path, since plain
+  decode is the side that uses int8 activations.
 
 Reproduce with [`scripts/spec_exactness.py`](scripts/spec_exactness.py).
 
@@ -393,11 +433,55 @@ serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gem
 
 ## Not measured here
 
-- **Native ExLlamaV3 TP2 / TP4.** ExLlamaV3 tensor parallelism is single-host only: one
-  `multiprocessing.Process` per *local* CUDA index, payloads through
-  `multiprocessing.shared_memory`, `EXLLAMA_MASTER_ADDR` defaulting to `127.0.0.1`, and no
-  multi-host worker. It does not span two Sparks, so no cross-node native numbers exist to publish.
-  TP2 and TP4 in this repository are the vLLM path.
+- **Native ExLlamaV3 TP2 / TP4.** No cross-node native numbers exist to publish, so TP2 and TP4
+  in this repository are the vLLM path. The findings below come from reading the runtime, not
+  from measurement, and are recorded because they change what the work would actually involve.
+
+  **Multi-host transport is closer than it looks.** `TPBackendNCCL` already exists, is the
+  default backend (`model.py:348`), and calls a real
+  `dist.init_process_group("nccl", rank, world_size, init_method)`. `EXLLAMA_MASTER_ADDR` and
+  `EXLLAMA_MASTER_PORT` are already environment-configurable rather than hardcoded, and there is
+  **no CUDA IPC anywhere** in `exllamav3/model/`, so nothing is pinned to one host at the
+  memory-handle level. Three things are genuinely host-local: rank is derived from the local
+  device list (`world_size = len(active_devices)`, `rank = active_devices.index(device)`, so two
+  single-GPU hosts both compute rank 0), the control plane dispatches over
+  `multiprocessing.Pipe` to locally spawned processes, and `broadcast`, `gather` and
+  `gather_small` all delegate to the shared-memory `TPBackendNative` fallback. Only `all_reduce`
+  and `fwd_barrier` are native NCCL. `gather_small` runs **per token** for the argmax, so it sits
+  on the critical path.
+
+  **The real blocker is the attention path, not the network.** `layer_types` is derived from
+  `compress_ratios`, which on this pack is `{0: 2, 2: 18, 1: 20}`, giving **2 layers of
+  `DSV4Attention` and 38 of `DSV41Attention`**. `dsv4.py` has `all_reduce` calls;
+  `modules/dsv41.py` contains **zero** occurrences of `backend`, `all_reduce`, `tp_` or
+  `num_devices`. So 95% of the layers have no tensor-parallel path at all.
+
+  **And it fails silently rather than refusing.** `supports_tp` defaults to `True`
+  (`model.py:26`), this architecture never overrides it, and `model.py:443` raises
+  `NotImplementedError` only when the cap is `False`. A TP load therefore starts and runs layers
+  that never reduce their partial sums. Anyone attempting native TP on this pack should set that
+  cap to `False` first.
+
+  **TP3 is not representable at all**, independently of any of the above: `num_attention_heads`
+  is 64, `hidden_size` 5120, `num_key_value_heads` 1 (MLA compressed latent, unsplittable), and
+  none divide by three. vLLM enforces this directly (`vllm/config/model.py:1367`,
+  `total_num_attention_heads % tensor_parallel_size != 0`), so the legal sizes are the divisors
+  of 64. TP2 divides cleanly everywhere: 64 to 32 heads, 5120 to 2560, 384 experts to 192,
+  `moe_intermediate_size` 2304 to 1152.
+
+  **One encouraging detail for anyone costing out the attention work.** The DSA indexer looks
+  like it would need a distributed top-k, which would be hard, but it does not.
+  `qsa_indexer.py` computes `s = einsum("bshd,bnd->bshn", q, pooled)` then
+  `F.relu(s).sum(dim = 2)`, summing over heads **before** the top-k. Since the relu is
+  elementwise per head, each rank holds an exact partial sum, so head sharding needs only an
+  `all_reduce` of the scores followed by an identical local top-k on every rank. No all-gather
+  and no custom kernel work. Note the cross-layer constraint though: `kv_source_layer_ids` and
+  `index_source_layer_ids` mean consumer layers reuse a producer layer's latents and selection,
+  so any shard layout has to stay consistent across that dependency.
+
+  The MTP drafter sets `supports_tp: False`, but `attach_to` has an explicit
+  `if target.loaded_tp: self._load_own_embed_head()` branch, so it is designed to run unsharded
+  beside a tensor-parallel target rather than being unusable.
 - **TabbyAPI throughput.** Not run end-to-end against this pack. See `tabbyapi/README.md`.
 - **Quantized KV.** Long context *is* measured above, to 262,144.
 - **CUDA-graph capture is not an open item.** The batched decode graph
