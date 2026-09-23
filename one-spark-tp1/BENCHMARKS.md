@@ -212,6 +212,47 @@ slightly ahead. The mean carries that one subject and the median discards it.
 Compare only within pairs. Runs 3 and 4 are faster than runs 1 and 2 on nearly every subject
 regardless of the setting, which is the page cache warming across the session.
 
+### Re-measured with output hashes: off wins on five of six subjects
+
+A second, larger measurement with `scripts/ab_arms.sh`, which records the output token ids of
+every generation and alternates arms strictly (A, AP, A, AP, one process each). It was taken on
+the **second Spark** with the pack read over NFS from the first (runtime identity below), so
+compare its rows to each other and not to the tables above.
+
+Varied mode, the same six subjects, drafter on, two rounds per arm, median ms/token:
+
+| Subject | prefetch on (default) | prefetch off | off faster by |
+|---|---:|---:|---:|
+| orbital | 37.95 | 32.38 | **14.7%** |
+| bread | 36.32 | 31.71 | **12.7%** |
+| law | 35.24 | 31.34 | **11.0%** |
+| marine biology | 43.82 | 39.30 | **10.3%** |
+| medieval trade | 65.77 | 59.38 | **9.7%** |
+| computing | 49.69 | 49.80 | -0.2% |
+
+Computing is the first generation in each process and swings 40 to 60 ms/token in both arms, so
+it carries no signal either way. **Token ids were identical between the arms on every subject**
+and each arm was self-deterministic, as the mechanism predicts: the prefetch's return values are
+discarded, so it cannot change output. Draft accounting was identical too (acceptance 0.946,
+4.622 tokens/round); only the cost of a round moved, from 175.4 to 157.3 ms.
+
+Repeated prompt, same session and hardware, drafter on: 34.61 ms/token (29.2 tok/s warm) with the
+prefetch, **32.57 ms/token (30.7 tok/s) without, +5.9%**, ids identical.
+
+This supersedes "a wash" for warm-to-lukewarm traffic. It does **not** establish that off is free on
+genuinely cold rows: the second round of each arm ran with rows the first round had paged in, and
+the marine-biology result in the earlier table is the cold-row case the prefetch exists for. The
+default is unchanged; see `README.md` for when to turn it off.
+
+Runtime identity for this subsection and for "Measured 2026-09-23" below (`AGENTS.md` rule 8):
+second DGX Spark (GB10, 128 GB, ATS addressing mode), driver 580.159.03, the pack
+`vcruz305/DSV4.1-Flash-SAGE-EXL3-1.59bpw` at `5dc954019183ab3d994b60433256001a3f1780e7` plus the
+`exllamav3/` overlay, **read over NFS (CX7) from the first Spark**, which moves Engram and drafter
+reads onto the network; native ExLlamaV3 `954a8ca`, built in place for `12.1a` with CUDA 13.0 and
+torch 2.13.0+cu130 on Python 3.12; TP1, `CTX=6144`, `CHUNK=2048`, `max_batch_size=1`,
+`EXL3_ATS_MMAP=1`, `EXL3_ATS_COPY='^(?!mtp\.)'`, DSpark at `EXL3_DSPARK_CONF=0.7` block 5
+where the drafter is on; per-expert mixed-K MoE path (K1 to K6).
+
 ## Decode speed varies 2x to 3x with prompt subject
 
 This is the most consequential caveat in this file, and it applies to every other number in it.
@@ -494,7 +535,7 @@ Recorded so they are not re-tried. Same runtime identity as above.
 | `EXL3_ENGRAM_ATS=0` | 32.45 vs 32.50 baseline, −0.2% | null; inside run-to-run noise |
 | Pinning the process to the big-core cluster with `taskset` | 32.83 vs 32.57 baseline, +0.8%; combined with `EXL3_INT8_GEMV=0` it reaches only 30.84, still well below baseline | null; inside noise, and it cannot rescue the int8 result |
 | Porting a batched-MTP-verify, device-resident draft chain and GPU-side embedding change set from a sibling EXL3 recipe | four paired runs in one session: 32.60 unpatched, 32.54 patched, 32.55 patched with its own knobs off, 32.60 patched again | **null**; reverted, not carried into this recipe |
-| The cooperative fused-MoE kernel (`exl3_moe_coop`) | it takes one `Kg` / `Ku` / `Kd` per launch; 834 of 15360 experts in this pack have `Kg != Ku`, and gate widths span 4 distinct K values inside a single layer, so no single launch can cover a layer | **structurally closed to this pack** |
+| The cooperative fused-MoE kernel (`exl3_moe_coop`) | it takes one `Kg` / `Ku` / `Kd` per launch; 834 of 15360 experts in this pack have `Kg != Ku`, and gate widths span 4 distinct K values inside a single layer, so no single launch can cover a layer | closed **to one launch per layer**; see the note below |
 
 The grouped-MoE result is the important one: an exact per-slot mgemm loses to the int8 GEMV path on
 this hardware, so reducing kernel launch count did not help.
@@ -513,6 +554,17 @@ uniform-K repack, and the cooperative kernel all require one quantization per la
 uniform-K pack will hand you levers that this pack structurally cannot use, so measure before
 porting rather than after.
 
+> **Correction, and an open lead.** "One quantization per launch" does not mean one launch per
+> layer. Partition the layer's experts by their `(Kg, Ku, Kd)` tuple and each partition is
+> uniform, which is what `vcruz305/exllamav3` added in `785f206` and `5e0ba47`, both **after**
+> the `954a8ca` pinned here. Counted from this pack's own tensor headers, **75.7%** of routed
+> experts sit in a group of four or more whose gate, up and down K all agree (a compile-time-K
+> launch), **21.9%** in a group whose K differ (the runtime-K launch), and only **2.4%** fall
+> below the four-expert cutoff and stay per-expert, at 8.6 such groups per layer. So the
+> grouped path is reachable on this pack. **It has since been measured, and it is slower**; see
+> "Measured 2026-09-23" below. The structural conclusion above was wrong, but the practical one
+> stands: on GB10 no fused MoE path tested beats the dense per-expert loop on this pack.
+
 The GEMV sweep is the other one worth reading. Since the decode is GPU-bound, the remaining lever
 would have to be the kernels themselves, and the int8 GEMV path is already close to its floor: it
 never materializes fp16 at all. The `u32` product of the extracted trellis word and the codebook
@@ -520,6 +572,47 @@ constant *is* four int8 codebook values, consumed directly by `dp4a` against int
 activations, so a 32-weight block costs roughly 8 integer multiplies plus 8 `dp4a`. Reducing that
 meaningfully is not a tuning exercise. Note also that the GEMV path is gated to `size_m <= 2`, so it
 serves the single-row drafter steps; the 6-row MTP verify runs through `exl3_gemm` / `exl3_mgemm`.
+
+### Measured 2026-09-23: grouped mixed-K dispatch and a pruned draft head
+
+Same runtime identity as "Re-measured with output hashes" under Engram row prefetch (second Spark,
+pack over NFS), repeated prompt, 6 generations x 256 tokens per process, two strictly alternating
+rounds per arm, measured with `scripts/ab_arms.sh` and scored with `scripts/ab_compare.py`.
+
+The grouped arms run a second tree, `vcruz305/exllamav3` `feat/gb10-ats-load` plus master's MoE
+kernel merge (`a11349d`), the `f6e42ec` `EXL3_MIXEDK_LEGACY` knob and local fixes (branch
+`wip/tp1-mixedk-legacy`, tip `4fbb88c`), always with `EXL3_GR_INT8=0`.
+
+| Arm | Drafter | median ms/token | vs pinned | Deterministic | ids = pinned |
+|---|---|---:|---:|---|---|
+| Pinned `954a8ca`, dense per-expert MoE | off | **70.20** | baseline | yes | n/a |
+| Grouped per-K-group dispatch (`EXL3_MIXEDK_LEGACY=1`), as shipped | off | 109.33 | **-36% tok/s** | **no**: up to 6 different outputs across 6 identical generations | no |
+| Grouped + deterministic slot accumulation (`EXL3_MIXEDK_DET_GROUPS=1`) | off | 94.66 | **-26% tok/s** | yes | no |
+| Pinned | on | **34.17** | baseline | yes | n/a |
+| Grouped + deterministic slots | on | 87.14 | **-61% tok/s** | no (first generation differs) | no |
+| Pinned + pruned draft head (`EXL3_MTP_HEAD_N=65536`) | on | 66.95 | **-48% tok/s** | yes | no |
+
+Three findings, in order of how much they should change future work:
+
+1. **The grouped dispatch loses on GB10 even where it has a compile-time K.** 75.7% of this
+   pack's experts get the unrolled instance and it is still 26% slower at one row than launching
+   each expert separately. Upstream measured the unified kernel at -15.7% on this pack
+   (`13f1c16`); the grouped path is worse, not better. With the drafter on it also cut tokens per
+   round from 4.27 to 1.46, which the per-round cost alone does not explain and which was not
+   chased further, since the one-row result already rules the arm out.
+2. **Upstream's legacy path is not reproducible.** Called without a slot table, `exl3_moe`
+   accumulates with atomics, and identical inputs produced up to six distinct generations in six
+   runs. The deterministic variant fixes that and was faster than the atomic one, but still
+   loses to the dense loop, and its sums run in a different order, so its tokens differ from the
+   pinned tree's anyway. The same local branch also fixes the legacy path dropping any expert
+   the kernel skipped for exceeding its 128-row window, which only prefill chunks reach.
+3. **Pruning the draft head by vocabulary id collapses drafting.** Restricting the drafter's
+   argmax to the first 65536 of 129280 ids cut tokens per round from 4.27 to 1.35 at 0.917
+   acceptance: the ids this text needs are not concentrated at the low end of DeepSeek's
+   vocabulary, so the drafter proposes the wrong tokens and the confidence gate stops the block.
+   A frequency-ranked subset might behave differently; an id-range slice does not work here.
+
+Engram prefetch off (above) is the one lever from this round that passed every gate.
 
 ## Not measured here
 
