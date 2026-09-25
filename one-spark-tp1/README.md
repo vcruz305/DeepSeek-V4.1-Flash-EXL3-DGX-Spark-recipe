@@ -120,6 +120,11 @@ export CTX=6144
 `EXL3_DSPARK_CONF=0.7` is the measured optimum: a sweep of 0.3 / 0.5 / 0.7 / 0.85 / 0.95
 put 0.7 fastest at every context tested, with 0.95 costing about 10%. See `BENCHMARKS.md`.
 
+For maximum throughput on repeated or highly similar prompts, add the Engram prefetch variant
+described below. It is worth 3.2% and takes warm decode to 33.63 – 33.66 tok/s. Everything else
+tried is recorded under [Measured dead ends](#measured-dead-ends), including several changes that
+looked promising and measured slower.
+
 `CTX` can be raised well beyond 6144 at almost no cost: 131,072 measures the same warm
 decode as 6,144, and 262,144 costs about 1 tok/s. `CTX` must be a multiple of 256.
 
@@ -172,18 +177,25 @@ See `scripts/run_tp1.sh` for the exact launcher, including a pre-flight `MemAvai
 
 Warm and cold are reported separately and are never combined (`AGENTS.md` benchmark discipline).
 
-### Decode, no drafter
-
-| Loading mode | Decode tok/s | Notes |
-|---|---:|---|
-| Main model in CUDA | **15.13 – 15.22** | load 37.5 s, ~107 GiB resident |
-
 ### Decode, DSpark drafter at confidence 0.7
+
+This is the configuration the recipe ships, and the one to quote.
 
 | Loading mode | Fresh prompt | Repeat prompt | Acceptance |
 |---|---:|---:|---:|
 | **Main in CUDA + drafter aliased** | **17.53 median** (mean 19.82) | **20.11 – 24.67** | 0.889 |
 | Interactive chat session | 11.8 cold | 17.4 warm | 0.74 |
+
+Repeating a single prompt in one process reaches **33.36 – 33.37 tok/s** at the default Engram
+prefetch and **33.63 – 33.66 tok/s** with `EXL3_ENGRAM_PREFETCH=0`, at 0.981 acceptance. That is the
+highest decode measured on this box. Those are prefix-cache best cases and are not comparable to the
+fresh-prompt column above. See the context, confidence-gate and Engram tables in `BENCHMARKS.md`.
+
+### Decode, no drafter
+
+| Loading mode | Decode tok/s | Notes |
+|---|---:|---|
+| Main model in CUDA | **15.13 – 15.22** | load 37.5 s, ~107 GiB resident |
 
 ### Prefill
 

@@ -32,15 +32,35 @@ matrix and full runtime identity are in [`four-spark-tp4/`](four-spark-tp4/READM
 
 Native ExLlamaV3 from the `vcruz305/exllamav3` fork, with the EXL3 attention/MTP overlay:
 
+Decode figures lead with the DSpark drafter, which is the configuration this recipe ships.
+
 | Measurement | Result |
 |---|---:|
-| Decode, no drafter | **15.13 – 15.22 tok/s** |
-| Decode, DSpark drafter, fresh prompt | **17.53 median**, 19.82 mean |
-| Decode, DSpark drafter, repeat prompt | 20.11 – 24.67 tok/s |
+| **Decode, drafter, warm repeat prompt, max** | **33.63 – 33.66 tok/s** |
+| Decode, drafter, warm repeat prompt, default prefetch | 32.55 – 33.37 tok/s |
+| Decode, drafter, fresh prompt | **17.53 median**, 19.82 mean |
+| Decode, no drafter, fresh prompt | 15.13 – 15.22 tok/s |
+| Draft acceptance | 0.981 warm repeat, 0.889 fresh prompt |
 | Prefill, chunk 4096 | 254 – 261 tok/s |
+| Load time, resident size | 37.5 s, ~107 GiB |
+
+**Warm repeat and fresh prompt are different workloads, and the two groups are never comparable.**
+The warm rows repeat one prompt in a single process, a best-case prefix-cache hit that isolates the
+cost of decode. The fresh rows serve a different prompt every generation. Quote the fresh-prompt
+figures for anything resembling real traffic, and the warm ones only as a ceiling.
+
+The max row is the explicit Engram variant `EXL3_ENGRAM_PREFETCH=0` (`AGENTS.md` rule 9), measured
+in strict alternation against the default: 33.63 and 33.66 with it off against 32.55 and 32.67 with
+it on, a 3.2% gain with no overlap between the two sets. Every other figure on this page was
+produced with the prefetch at its default.
+
+Context is nearly free: 131,072 measures the same warm decode as 6,144, and 262,144 costs about
+1 tok/s, and the run-time settings are in [`one-spark-tp1/README.md`](one-spark-tp1/README.md).
 
 Methodology, runtime identity and negative results:
-[`one-spark-tp1/BENCHMARKS.md`](one-spark-tp1/BENCHMARKS.md).
+[`one-spark-tp1/BENCHMARKS.md`](one-spark-tp1/BENCHMARKS.md) – which also carries the rest of the
+fresh-prompt session's row, including its repeat-prompt column (20.11 – 24.67 tok/s at 0.889
+acceptance).
 
 ## Quick start: four Sparks
 
