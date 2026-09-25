@@ -156,6 +156,7 @@ for _exl3_key in \
   VLLM_EXL3_MADV_AFTER_H2D \
   VLLM_EXL3_PREFETCH \
   VLLM_EXL3_PAD_SO_CB \
+  VLLM_EXL3_MOE_TP_ALIGN \
 ; do
   if [[ -n "${!_exl3_key:-}" ]]; then
     EXEC_ENV+=( -e "$_exl3_key=${!_exl3_key}" )

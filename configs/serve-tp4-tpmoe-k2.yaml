@@ -1,0 +1,53 @@
+# Serve config captured from the measured 4x Spark TP4 + TP-MoE deployment
+# (2026-09-24, k=2, "all-round" default).
+#
+# Source: /tmp/serve-tp4-d203.yaml.opus-tpmoe-c10 inside the `dsv41-tp4`
+# container on the vLLM server node. profiles/tp4-tpmoe.env reproduces it
+# through scripts/serve_tp4.sh (MOE_PARALLEL_MODE=tp).
+#
+# Runtime identity of the captured run:
+#   topology        TP4 (MoE-TP4, EP1) over 4x GB10
+#   vllm-exl3       requires vcruz305/vllm-exl3 PR #36 (Hadamard-aligned
+#                   uneven TP MoE, VLLM_EXL3_MOE_TP_ALIGN=128) and PR #37
+#                   (padded-MoE loops bounded by n_valid)
+#   bench           llm-inference-bench v0.4.29, 20s sustained cells
+#   cold load       ~9 minutes
+#
+# Unlike the EP4 path (configs/serve-tp4-live.yaml), this profile disables
+# expert parallelism and the EP weight filter and routes MoE through tensor
+# parallelism instead, relying on PR #36/#37 to keep the padded MoE kernel
+# correct at the resulting uneven per-rank expert widths.
+model: /models/dsv41-orig
+quantization: exl3
+tokenizer-mode: deepseek_v41
+tensor-parallel-size: 4
+enable-expert-parallel: false
+enable-ep-weight-filter: false
+distributed-executor-backend: ray
+language-model-only: true
+tool-call-parser: deepseek_v41
+enable-auto-tool-choice: true
+reasoning-parser: deepseek_v41
+served-model-name: deepseek-v41-exl3
+host: 0.0.0.0
+port: 8002
+gpu-memory-utilization: 0.55
+kv-cache-memory-bytes: 8589934592
+max-model-len: 1048576
+max-num-seqs: 10
+max-num-batched-tokens: 4096
+block-size: 128
+enforce-eager: false
+trust-remote-code: true
+enable-prefix-caching: true
+engram-config:
+  cpu_offload: false
+speculative-config:
+  method: dspark
+  num_speculative_tokens: 2
+  draft_sample_method: probabilistic
+  rejection_sample_method: block
+  quantization: mxfp4
+compilation-config:
+  cudagraph_mode: FULL_DECODE_ONLY
+  cudagraph_capture_sizes: [3, 6, 9, 12, 15, 18, 21, 24, 27, 30]
