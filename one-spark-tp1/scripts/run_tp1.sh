@@ -26,6 +26,7 @@ export EXL3_ATS_COPY="${EXL3_ATS_COPY:-^(?!mtp\.)}"
 
 # --- Speculative decoding (DSpark / MTP) -----------------------------------
 export EXL3_DSPARK_CONF="${EXL3_DSPARK_CONF:-0.7}"
+export EXL3_ENGRAM_PREFETCH="${EXL3_ENGRAM_PREFETCH:-1}"
 export DRAFT="${DRAFT:-1}"
 
 # --- Shapes ----------------------------------------------------------------
@@ -67,6 +68,7 @@ fi
 echo "model   : $MODEL_DIR"
 echo "copy re : $EXL3_ATS_COPY"
 echo "draft   : $DRAFT (conf $EXL3_DSPARK_CONF)"
+echo "engram prefetch: $EXL3_ENGRAM_PREFETCH (0 = opt-in for warm traffic, see README \"Engram row prefetch\")"
 echo "ctx/chunk: $CTX / $CHUNK"
 echo "load takes ~40 s and will drive MemAvailable to ~5 GiB; this is expected"
 

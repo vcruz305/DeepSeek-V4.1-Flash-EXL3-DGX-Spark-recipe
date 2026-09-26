@@ -131,28 +131,43 @@ decode as 6,144, and 262,144 costs about 1 tok/s. `CTX` must be a multiple of 25
 `EXL3_ATS_COPY` takes a regex matched against tensor names; matching tensors are copied into CUDA
 memory, the rest stay aliased. The negative lookahead above is the whole trick.
 
-### Optional: Engram row prefetch
+### Opt-in: Engram row prefetch off
 
-Engram row prefetch is **on by default** (`exllamav3/modules/engram.py` reads
-`EXL3_ENGRAM_PREFETCH`, defaulting to `1`) and is left on in every figure in `BENCHMARKS.md`.
-Disabling it is a measured win on repeated prompts and a wash on varied ones, so it is published as
-an explicit variant rather than folded into the block above, per `AGENTS.md` rule 9:
+Engram row prefetch is **on by default** (`EXL3_ENGRAM_PREFETCH=1`, read by
+`exllamav3/modules/engram.py`). Turning it off is an **opt-in** that trades cold-start robustness
+for speed on warm traffic. It never changes the generated text. Kept explicit per `AGENTS.md`
+rule 9.
 
 ```bash
-export EXL3_ENGRAM_PREFETCH=0    # repeated or highly similar prompts: +3.2% decode
+EXL3_ENGRAM_PREFETCH=0 MODEL_DIR=... scripts/run_tp1.sh
 ```
 
-Use it when the same prompt or prompt prefix is served repeatedly: a benchmark loop, a fixed system
-prompt, or a long session on one topic. Leave it at the default for varied traffic.
+**What it does.** Engram is two layers (1 and 14) that look up the recent n-grams in lookup tables
+totalling 188.8 GiB of FP8 rows. The tables are never copied into GPU memory: they stay
+memory-mapped from disk, and every forward the GPU reads just the rows it needs straight out of
+the mapping. With prefetch **on**, the CPU first works out which rows this step needs and reads
+each one from the file with a thread pool, then throws the bytes away. Its only purpose is to
+pull those pages into the OS page cache in parallel so the GPU finds them in RAM. With prefetch
+**off** that step is skipped and the GPU reads directly: rows already in RAM cost nothing extra,
+and rows that are not are faulted in by the GPU one page at a time.
 
-The mechanism explains both halves. The prefetch reads the gathered Engram rows on the host so their
-pages enter the page cache before the GPU faults on them one page at a time. When those pages are
-already resident the gather finds everything present, so it and its per-layer host sync are pure
-overhead. When the rows are genuinely cold it earns its cost back, and on one of the six varied
-subjects tested it earned back far more than it cost.
+**The trade-off.**
 
-It cannot change output. Both `_gather` return values are discarded, so the call is a page-cache
-hint and nothing else. See `BENCHMARKS.md` for the paired measurements and the varied-prompt caveat.
+| Traffic | Prefetch on | Prefetch off |
+|---|---|---|
+| Rows already in the page cache (repeated prompt, fixed system prompt, a session on one topic, a warmed box) | pays the host-side step on every forward for nothing | **faster: +3.2% to +5.9% on a repeated prompt, +9.7% to +14.7% on five of six varied subjects** |
+| Rows never read before (cold start, genuinely diverse text) | **faster**: cold rows load in parallel | slower: the GPU waits on serial page faults, up to 14 to 20 ms/token on the one cold subject measured |
+
+The deciding fact is capacity: once the model is resident roughly 5 GiB of RAM is left to cache
+188.8 GiB of tables. Frequent n-grams stay cached, but long, diverse traffic keeps reaching rows it
+has never loaded.
+
+**Use `0`** for benchmarks, fixed system prompts, chat on a topic, and repeated or similar
+prompts. **Keep the default** for a cold box or broad, unpredictable traffic.
+
+Output is identical either way: the prefetch's reads are discarded, so it only changes when
+pages load, never what the model computes. The paired, hash-checked measurements are in
+`BENCHMARKS.md` under "Engram row prefetch".
 
 Load takes ~40 s and drives `MemAvailable` down to roughly 5 GiB, which is expected. Do not run a
 second model process alongside it.
@@ -302,6 +317,23 @@ TP. That validates export, import, spawn, dispatch and the collective path; it d
 the splitting arithmetic, since at one rank nothing is actually split. See
 [`BENCHMARKS.md`](BENCHMARKS.md) under "Measured: native TP now runs on one Spark". It changes
 nothing about the paragraph above: the engine still cannot span two Sparks.
+
+## Measuring a change on this pack
+
+Open leads, the arithmetic behind them and the gates each one has to clear are in
+[`OPTIMIZATION_CANDIDATES.md`](OPTIMIZATION_CANDIDATES.md), which marks each one measured or
+still open; the measured numbers themselves live in `BENCHMARKS.md`.
+
+| Script | Answers |
+|---|---|
+| `scripts/ab_arms.sh` | runs two or more arms in strict alternation, one process per arm |
+| `scripts/ab_dispatch.py` | one arm: per-subject decode speed, draft accounting, and the output token-id hash |
+| `scripts/ab_compare.py` | is the arm deterministic, does it emit the baseline's tokens, and is it faster per subject |
+| `scripts/module_timing.py` | which modules a round spends its time in, via CUDA events rather than the profiler |
+
+A lever ships only if it clears all three gates in that order. Throughput measured against a
+different generated text is not a speedup, which is the trap the confidence-gate table in
+`BENCHMARKS.md` fell into.
 
 ## Serving with TabbyAPI
 
